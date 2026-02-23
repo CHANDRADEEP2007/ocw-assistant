@@ -83,6 +83,9 @@ export const calendarEvents = sqliteTable('calendar_events', {
 export const draftEmails = sqliteTable('draft_emails', {
   id: text('id').primaryKey(),
   accountId: text('account_id'),
+  threadId: text('thread_id'),
+  inReplyTo: text('in_reply_to'),
+  referencesHeader: text('references_header'),
   toJson: text('to_json').notNull(),
   ccJson: text('cc_json'),
   bccJson: text('bcc_json'),

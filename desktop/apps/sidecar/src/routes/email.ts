@@ -1,7 +1,7 @@
 import type { Express } from 'express';
 import { z } from 'zod';
 
-import { approveAndSendDraftEmail, createDraftEmail, getDraftEmail, listDraftEmails } from '../services/emailDraftService.js';
+import { approveAndSendDraftEmail, createDraftEmail, createReplyDraftFromThread, getDraftEmail, listDraftEmails } from '../services/emailDraftService.js';
 import { getGmailThread, listGmailThreads } from '../services/gmailThreadService.js';
 
 const generateSchema = z.object({
@@ -17,6 +17,13 @@ const generateSchema = z.object({
 
 const approveSchema = z.object({
   approvedBy: z.string().optional(),
+});
+
+const replyDraftSchema = z.object({
+  accountId: z.string().optional(),
+  prompt: z.string().optional(),
+  tone: z.enum(['professional', 'friendly', 'concise']).optional(),
+  requestedBy: z.string().optional(),
 });
 
 const threadListSchema = z.object({
@@ -56,6 +63,20 @@ export function registerEmailRoutes(app: Express) {
     try {
       const result = await getGmailThread({ threadId: req.params.threadId, accountId });
       res.json({ item: result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(400).json({ error: message });
+    }
+  });
+
+  app.post('/api/email/threads/:threadId/reply-draft', async (req, res) => {
+    const parsed = replyDraftSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'invalid_request', details: parsed.error.flatten() });
+    }
+    try {
+      const result = await createReplyDraftFromThread({ threadId: req.params.threadId, ...parsed.data });
+      res.status(201).json(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       res.status(400).json({ error: message });

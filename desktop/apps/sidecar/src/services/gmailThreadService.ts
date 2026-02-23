@@ -41,10 +41,14 @@ export type GmailThreadMessageDTO = {
   id: string;
   from: string;
   to: string;
+  cc: string;
+  replyTo: string;
   subject: string;
   sentAt: string;
   snippet: string;
   bodyPreview: string;
+  messageIdHeader: string;
+  referencesHeader: string;
 };
 
 export type GmailThreadDTO = {
@@ -166,16 +170,24 @@ export async function getGmailThread(input: { threadId: string; accountId?: stri
       const subject = header(payload, 'Subject') || '(No Subject)';
       const from = header(payload, 'From') || '';
       const to = header(payload, 'To') || '';
+      const cc = header(payload, 'Cc') || '';
+      const replyTo = header(payload, 'Reply-To') || '';
+      const messageIdHeader = header(payload, 'Message-Id') || header(payload, 'Message-ID') || '';
+      const referencesHeader = header(payload, 'References') || '';
       const dateRaw = header(payload, 'Date');
       const sentAt = dateRaw ? new Date(dateRaw).toISOString() : (m.internalDate ? new Date(Number(m.internalDate)).toISOString() : new Date().toISOString());
       return {
         id: m.id || `msg_${Math.random().toString(36).slice(2, 8)}`,
         from,
         to,
+        cc,
+        replyTo,
         subject,
         sentAt,
         snippet: m.snippet || '',
         bodyPreview: (body || m.snippet || '').slice(0, 1200),
+        messageIdHeader,
+        referencesHeader,
       };
     })
     .sort((a, b) => (a.sentAt < b.sentAt ? -1 : 1));

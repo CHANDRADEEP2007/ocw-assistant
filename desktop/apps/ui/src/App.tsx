@@ -8,6 +8,7 @@ import {
   chat,
   disconnectAccount,
   generateEmailDraft,
+  generateReplyDraftFromThread,
   getGmailThread,
   googleOAuthComplete,
   googleOAuthStart,
@@ -25,6 +26,7 @@ import {
   approveSendEmailDraft,
 } from './lib/api';
 import type { ApprovalAction, AuditEntry, ChatMessage } from './types';
+import type { CalendarConflict, CalendarEvent, CalendarSummary } from './lib/api';
 
 const TOOL_OPTIONS = ['Calendar', 'Email', 'Projects'] as const;
 
@@ -77,6 +79,7 @@ export default function App() {
         subject: string;
         bodyPreview: string;
         status: string;
+        threadId?: string | null;
       }
     | {
         id: string;
@@ -87,9 +90,11 @@ export default function App() {
         messageCount: number;
         participants: string[];
         snippet: string;
+        latestFrom?: string;
       };
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [workspaceView, setWorkspaceView] = useState<'assistant' | 'calendar' | 'drafts' | 'projects' | 'settings'>('assistant');
   const [composer, setComposer] = useState('');
   const [model, setModel] = useState('llama3:8b');
   const [mode, setMode] = useState<'quick' | 'deep'>('quick');
@@ -104,7 +109,7 @@ export default function App() {
   const [oauthState, setOauthState] = useState('');
   const [oauthCode, setOauthCode] = useState('');
   const [calendarSyncStatus, setCalendarSyncStatus] = useState('');
-  const [emailDrafts, setEmailDrafts] = useState<Array<{ id: string; subject: string; status: string; to: string[]; body: string; approvalActionId: string | null }>>([]);
+  const [emailDrafts, setEmailDrafts] = useState<Array<{ id: string; subject: string; status: string; to: string[]; body: string; approvalActionId: string | null; threadId?: string | null }>>([]);
   const [emailTo, setEmailTo] = useState('recipient@example.com');
   const [emailSubjectHint, setEmailSubjectHint] = useState('Follow-up');
   const [emailPrompt, setEmailPrompt] = useState('Draft a professional follow-up about timelines and next steps.');
@@ -114,6 +119,10 @@ export default function App() {
   const [emailThreadResults, setEmailThreadResults] = useState<Array<{ id: string; snippet: string }>>([]);
   const [calendarPreviewCards, setCalendarPreviewCards] = useState<CalendarPreviewCard[]>([]);
   const [emailPreviewCards, setEmailPreviewCards] = useState<EmailPreviewCard[]>([]);
+  const [todayData, setTodayData] = useState<{ events: CalendarEvent[]; conflicts: CalendarConflict[] } | null>(null);
+  const [weekData, setWeekData] = useState<{ events: CalendarEvent[]; conflicts: CalendarConflict[] } | null>(null);
+  const [todaySummary, setTodaySummary] = useState<CalendarSummary | null>(null);
+  const [weekSummary, setWeekSummary] = useState<CalendarSummary | null>(null);
   const [isPending, startTransition] = useTransition();
 
   const suggestions = slashSuggestions(composer);
@@ -127,7 +136,7 @@ export default function App() {
       setActions(a.items);
       setAudit(logs.items);
       setAccounts(accts.items.map((x) => ({ id: x.id, provider: x.provider, accountEmail: x.accountEmail, status: x.status })));
-      setEmailDrafts(drafts.items.map((d) => ({ id: d.id, subject: d.subject, status: d.status, to: d.to, body: d.body, approvalActionId: d.approvalActionId })));
+      setEmailDrafts(drafts.items.map((d) => ({ id: d.id, subject: d.subject, status: d.status, to: d.to, body: d.body, approvalActionId: d.approvalActionId, threadId: d.threadId })));
     } catch {
       // no-op for UI shell
     }
@@ -226,6 +235,7 @@ export default function App() {
           subject: res.draft.subject,
           bodyPreview: res.draft.body,
           status: res.draft.status,
+          threadId: res.draft.threadId,
         },
         ...prev.filter((c) => c.id !== `draft_${res.draft.id}`).slice(0, 7),
       ]);
@@ -233,6 +243,35 @@ export default function App() {
     } catch (err) {
       setEmailStatus(`Draft failed: ${String(err)}`);
       setMessages((prev) => [...prev, toChatMessage('assistant', `Email draft error: ${String(err)}`)]);
+    }
+  }
+
+  async function createReplyDraft(threadId: string) {
+    try {
+      setEmailStatus(`Preparing reply draft for ${threadId}...`);
+      const res = await generateReplyDraftFromThread(threadId, { tone: emailTone });
+      setEmailStatus(`Reply draft created: ${res.draft.id} (approval required)`);
+      setEmailPreviewCards((prev) => [
+        {
+          id: `draft_${res.draft.id}`,
+          kind: 'draft',
+          title: 'Reply Draft Preview',
+          recipients: res.draft.to,
+          subject: res.draft.subject,
+          bodyPreview: res.draft.body,
+          status: res.draft.status,
+          threadId: res.draft.threadId,
+        },
+        ...prev.filter((c) => c.id !== `draft_${res.draft.id}`).slice(0, 7),
+      ]);
+      setMessages((prev) => [
+        ...prev,
+        toChatMessage('assistant', `✉️ Reply draft prepared for thread ${threadId}\nSubject: ${res.draft.subject}\nTo: ${res.draft.to.join(', ')}`),
+      ]);
+      await refreshOps();
+    } catch (err) {
+      setEmailStatus(`Reply draft failed: ${String(err)}`);
+      setMessages((prev) => [...prev, toChatMessage('assistant', `Reply draft error: ${String(err)}`)]);
     }
   }
 
@@ -278,6 +317,7 @@ export default function App() {
           messageCount: thread.messages.length,
           participants,
           snippet: thread.messages.map((m) => `${m.from}: ${m.bodyPreview}`).join('\n\n').slice(0, 1800),
+          latestFrom: thread.messages[thread.messages.length - 1]?.from,
         },
         ...prev.filter((c) => c.id !== `thread_${thread.id}`).slice(0, 7),
       ]);
@@ -292,11 +332,29 @@ export default function App() {
           ].join('\n'),
         ),
       ]);
+      setWorkspaceView('assistant');
       setEmailStatus(`Loaded thread ${thread.id}`);
       await refreshOps();
     } catch (err) {
       setEmailStatus(`Open thread failed: ${String(err)}`);
       setMessages((prev) => [...prev, toChatMessage('assistant', `Gmail thread error: ${String(err)}`)]);
+    }
+  }
+
+  async function refreshCalendarPanel(modeToLoad: 'today' | 'week') {
+    try {
+      if (modeToLoad === 'today') {
+        const [day, summaryRes] = await Promise.all([calendarToday(), calendarSummary('today')]);
+        setTodayData(day);
+        setTodaySummary(summaryRes.summary);
+      } else {
+        const [week, summaryRes] = await Promise.all([calendarWeek(), calendarSummary('week')]);
+        setWeekData(week);
+        setWeekSummary(summaryRes.summary);
+      }
+      setWorkspaceView('calendar');
+    } catch (err) {
+      setMessages((prev) => [...prev, toChatMessage('assistant', `Calendar refresh error: ${String(err)}`)]);
     }
   }
 
@@ -336,6 +394,8 @@ export default function App() {
       try {
         const [day, summaryRes] = await Promise.all([calendarToday(), calendarSummary('today')]);
         const summary = summaryRes.summary;
+        setTodayData(day);
+        setTodaySummary(summary);
         setCalendarPreviewCards((prev) => [
           {
             id: `cal_today_${summary.date}`,
@@ -380,6 +440,8 @@ export default function App() {
       try {
         const [week, summaryRes] = await Promise.all([calendarWeek(), calendarSummary('week')]);
         const summary = summaryRes.summary;
+        setWeekData(week);
+        setWeekSummary(summary);
         setCalendarPreviewCards((prev) => [
           {
             id: `cal_week_${summary.date}`,
@@ -433,6 +495,119 @@ export default function App() {
     });
   }
 
+  const weekEventsByDay = (weekData?.events || []).reduce<Record<string, CalendarEvent[]>>((acc, ev) => {
+    const key = new Date(ev.startAt).toISOString().slice(0, 10);
+    (acc[key] ||= []).push(ev);
+    return acc;
+  }, {});
+  const weekDayKeys = Object.keys(weekEventsByDay).sort();
+
+  const renderCalendarWorkspace = () => (
+    <div className="calendar-workspace">
+      <div className="calendar-workspace-head">
+        <div>
+          <div className="calendar-workspace-title">Unified Calendar</div>
+          <div className="calendar-workspace-sub">
+            Google Calendar MVP unified view (multi-calendar). Outlook support slots into the same timeline later.
+          </div>
+        </div>
+        <div className="calendar-workspace-actions">
+          <button onClick={() => void refreshCalendarPanel('today')}>Refresh Today</button>
+          <button onClick={() => void refreshCalendarPanel('week')}>Refresh Week</button>
+        </div>
+      </div>
+
+      <div className="calendar-workspace-summary-grid">
+        <div className="calendar-summary-panel">
+          <div className="calendar-panel-title">Today Overview</div>
+          {todaySummary ? (
+            <>
+              <div className="calendar-workspace-summary-text">{todaySummary.conciseSummary}</div>
+              <div className="calendar-inline-metrics">
+                <span className="calendar-badge neutral">Events {todaySummary.totalEvents}</span>
+                <span className={`calendar-badge ${todaySummary.hardConflicts ? 'danger' : 'neutral'}`}>Hard {todaySummary.hardConflicts}</span>
+                <span className={`calendar-badge ${todaySummary.softConflicts ? 'warn' : 'neutral'}`}>Soft {todaySummary.softConflicts}</span>
+                <span className={`calendar-badge ${todaySummary.backToBackChains ? 'accent' : 'neutral'}`}>Back-to-back {todaySummary.backToBackChains}</span>
+              </div>
+            </>
+          ) : (
+            <div className="agenda-empty">Run `/today` or click Refresh Today</div>
+          )}
+        </div>
+
+        <div className="calendar-summary-panel">
+          <div className="calendar-panel-title">Week Overview</div>
+          {weekSummary ? (
+            <>
+              <div className="calendar-workspace-summary-text">{weekSummary.conciseSummary}</div>
+              <div className="calendar-inline-metrics">
+                <span className="calendar-badge neutral">Events {weekSummary.totalEvents}</span>
+                <span className={`calendar-badge ${weekSummary.hardConflicts ? 'danger' : 'neutral'}`}>Hard {weekSummary.hardConflicts}</span>
+                <span className={`calendar-badge ${weekSummary.softConflicts ? 'warn' : 'neutral'}`}>Soft {weekSummary.softConflicts}</span>
+              </div>
+            </>
+          ) : (
+            <div className="agenda-empty">Run `/week` or click Refresh Week</div>
+          )}
+        </div>
+      </div>
+
+      <div className="calendar-hybrid-grid">
+        <div className="calendar-week-board">
+          <div className="calendar-panel-title">Week Grid (Agenda Hybrid)</div>
+          {weekDayKeys.length === 0 && <div className="agenda-empty">No week data loaded</div>}
+          {weekDayKeys.map((dayKey) => (
+            <div key={dayKey} className="week-day-column">
+              <div className="week-day-header">
+                {new Date(`${dayKey}T00:00:00`).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}
+              </div>
+              <div className="week-day-events">
+                {(weekEventsByDay[dayKey] || [])
+                  .slice()
+                  .sort((a, b) => (a.startAt < b.startAt ? -1 : 1))
+                  .map((e) => (
+                    <div key={e.id} className={`week-event-chip ${e.status === 'tentative' ? 'tentative' : ''}`}>
+                      <div className="week-event-time">{formatTimeRange(e.startAt, e.endAt)}</div>
+                      <div className="week-event-title">{e.title}</div>
+                      <div className="week-event-sub">{e.calendarName || e.provider}</div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="calendar-agenda-side">
+          <div className="calendar-panel-title">Today Agenda</div>
+          <div className="agenda-list">
+            {!todayData?.events?.length && <div className="agenda-empty">No today data loaded</div>}
+            {(todayData?.events || []).slice(0, 12).map((e) => (
+              <div className="agenda-row" key={`panel_${e.id}`}>
+                <div className="agenda-time">{formatTimeRange(e.startAt, e.endAt)}</div>
+                <div className="agenda-dot" />
+                <div className="agenda-body">
+                  <div className="agenda-title">{e.title}</div>
+                  <div className="agenda-sub">{e.calendarName || e.provider}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="calendar-panel-title" style={{ marginTop: 12 }}>Conflicts</div>
+          <div className="agenda-list">
+            {!weekData?.conflicts?.length && <div className="agenda-empty">No conflict data loaded</div>}
+            {(weekData?.conflicts || []).slice(0, 8).map((c, idx) => (
+              <div className="conflict-row" key={`panel_conflict_${idx}`}>
+                <span className={`calendar-badge ${c.type === 'hard' ? 'danger' : 'warn'}`}>{c.type}</span>
+                <div className="conflict-text">{c.explanation}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <div className="workspace-root">
       <header className="topbar">
@@ -464,18 +639,54 @@ export default function App() {
             </ul>
           </div>
           <div className="sidebar-block compact-links">
-            <div>Assistant</div>
-            <div>Calendar</div>
-            <div>Drafts</div>
-            <div>Projects</div>
-            <div>Settings</div>
+            <button className={workspaceView === 'assistant' ? 'nav-link active' : 'nav-link'} onClick={() => setWorkspaceView('assistant')}>Assistant</button>
+            <button className={workspaceView === 'calendar' ? 'nav-link active' : 'nav-link'} onClick={() => setWorkspaceView('calendar')}>Calendar</button>
+            <button className={workspaceView === 'drafts' ? 'nav-link active' : 'nav-link'} onClick={() => setWorkspaceView('drafts')}>Drafts</button>
+            <button className={workspaceView === 'projects' ? 'nav-link active' : 'nav-link'} onClick={() => setWorkspaceView('projects')}>Projects</button>
+            <button className={workspaceView === 'settings' ? 'nav-link active' : 'nav-link'} onClick={() => setWorkspaceView('settings')}>Settings</button>
           </div>
         </aside>
 
         <main className="main-canvas">
           <section className="chat-canvas">
-            <div className="section-head">Conversation Thread</div>
+            <div className="canvas-head-row">
+              <div className="section-head" style={{ marginBottom: 0 }}>
+                {workspaceView === 'calendar' ? 'Unified Calendar' : workspaceView === 'drafts' ? 'Drafts Workspace' : workspaceView === 'projects' ? 'Projects Workspace' : workspaceView === 'settings' ? 'Settings' : 'Conversation Thread'}
+              </div>
+              <div className="canvas-tabs">
+                <button className={workspaceView === 'assistant' ? 'active' : ''} onClick={() => setWorkspaceView('assistant')}>Assistant</button>
+                <button className={workspaceView === 'calendar' ? 'active' : ''} onClick={() => setWorkspaceView('calendar')}>Calendar</button>
+                <button className={workspaceView === 'drafts' ? 'active' : ''} onClick={() => setWorkspaceView('drafts')}>Drafts</button>
+              </div>
+            </div>
             <div className="message-list">
+              {workspaceView === 'calendar' && renderCalendarWorkspace()}
+              {workspaceView === 'drafts' && (
+                <div className="drafts-workspace">
+                  <div className="drafts-grid">
+                    {emailDrafts.length === 0 && <div className="agenda-empty">No drafts yet. Use Email Draft Center or thread reply actions.</div>}
+                    {emailDrafts.map((d) => (
+                      <div className="email-card email-card-draft" key={`draftws_${d.id}`}>
+                        <div className="email-card-head">
+                          <div>
+                            <div className="email-card-title">{d.subject}</div>
+                            <div className="email-card-sub">To {d.to.join(', ') || '(none)'}{d.threadId ? ' · Reply draft' : ''}</div>
+                          </div>
+                          <span className={`email-status-pill ${d.status}`}>{d.status}</span>
+                        </div>
+                        <pre className="email-card-pre">{d.body}</pre>
+                        <div className="email-card-actions">
+                          {d.status === 'prepared' && <button onClick={() => void approveAndSendDraft(d.id)}>Approve & Send</button>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {workspaceView === 'projects' && <div className="empty-state">Project generator workspace is next (Phase 2). Use chat with `/projects` for now.</div>}
+              {workspaceView === 'settings' && <div className="empty-state">Settings workspace will centralize model defaults, tools, and permissions.</div>}
+              {workspaceView === 'assistant' && (
+                <>
               {calendarPreviewCards.length > 0 && (
                 <div className="calendar-preview-stack">
                   {calendarPreviewCards.map((card) => (
@@ -563,23 +774,33 @@ export default function App() {
                 </div>
               )}
               {emailPreviewCards.length > 0 && (
-                <div style={{ display: 'grid', gap: 8 }}>
+                <div className="email-preview-stack">
                   {emailPreviewCards.map((card) => (
-                    <div key={card.id} className="inline-card">
-                      <div className="inline-card-title">{card.title}</div>
-                      {card.kind === 'draft' ? (
+                    <div key={card.id} className={`email-card ${card.kind === 'draft' ? 'email-card-draft' : 'email-card-thread'}`}>
+                      <div className="email-card-head">
                         <div>
-                          <div><strong>To:</strong> {card.recipients.join(', ')}</div>
-                          <div><strong>Subject:</strong> {card.subject}</div>
-                          <div className="muted small">Status: {card.status}</div>
-                          <pre style={{ whiteSpace: 'pre-wrap', margin: '8px 0 0 0', fontFamily: 'inherit' }}>{card.bodyPreview}</pre>
+                          <div className="email-card-title">{card.title}</div>
+                          <div className="email-card-sub">{card.kind === 'draft' ? 'Draft preview (approval required)' : `Gmail thread · ${card.messageCount} messages`}</div>
+                        </div>
+                        {card.kind === 'draft' ? (
+                          <span className={`email-status-pill ${card.status}`}>{card.status}</span>
+                        ) : (
+                          <button onClick={() => void createReplyDraft(card.threadId)}>Draft Reply</button>
+                        )}
+                      </div>
+                      {card.kind === 'draft' ? (
+                        <div className="email-card-body">
+                          <div className="email-meta-row"><strong>To</strong><span>{card.recipients.join(', ')}</span></div>
+                          <div className="email-meta-row"><strong>Subject</strong><span>{card.subject}</span></div>
+                          {card.threadId && <div className="email-meta-row"><strong>Thread</strong><span className="mono small">{card.threadId}</span></div>}
+                          <pre className="email-card-pre">{card.bodyPreview}</pre>
                         </div>
                       ) : (
-                        <div>
-                          <div><strong>Subject:</strong> {card.subject}</div>
-                          <div className="muted small">Thread: {card.threadId} · Messages: {card.messageCount}</div>
-                          <div className="muted small">Participants: {card.participants.join(' | ') || 'n/a'}</div>
-                          <pre style={{ whiteSpace: 'pre-wrap', margin: '8px 0 0 0', fontFamily: 'inherit' }}>{card.snippet}</pre>
+                        <div className="email-card-body">
+                          <div className="email-meta-row"><strong>Subject</strong><span>{card.subject}</span></div>
+                          <div className="email-meta-row"><strong>Thread</strong><span className="mono small">{card.threadId}</span></div>
+                          <div className="email-meta-row"><strong>Participants</strong><span>{card.participants.join(' | ') || 'n/a'}</span></div>
+                          <pre className="email-card-pre">{card.snippet}</pre>
                         </div>
                       )}
                     </div>
@@ -594,6 +815,8 @@ export default function App() {
                 </div>
               ))}
               {isPending && <div className="assistant-thinking">Assistant is thinking...</div>}
+                </>
+              )}
             </div>
           </section>
 
@@ -727,6 +950,7 @@ export default function App() {
                     </div>
                     <div className="action-buttons">
                       <button onClick={() => void openThread(t.id)}>Open</button>
+                      <button onClick={() => void createReplyDraft(t.id)}>Reply Draft</button>
                     </div>
                   </div>
                 ))}

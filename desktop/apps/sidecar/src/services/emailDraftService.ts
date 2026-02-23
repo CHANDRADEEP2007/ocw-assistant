@@ -6,6 +6,7 @@ import { id } from '../lib/id.js';
 import { getConnectedAccountsByProvider } from './accountService.js';
 import { writeAuditLog } from './auditLog.js';
 import { prepareAction, transitionAction } from './approvalEngine.js';
+import { getGmailThread } from './gmailThreadService.js';
 import { forceRefreshGoogleAccessToken, getValidGoogleAccessToken } from './googleOAuth.js';
 
 function now() {
@@ -17,6 +18,9 @@ type DraftRow = typeof draftEmails.$inferSelect;
 export type DraftEmailDTO = {
   id: string;
   accountId: string | null;
+  threadId: string | null;
+  inReplyTo: string | null;
+  referencesHeader: string | null;
   to: string[];
   cc: string[];
   bcc: string[];
@@ -46,6 +50,9 @@ function toDto(row: DraftRow): DraftEmailDTO {
   return {
     id: row.id,
     accountId: row.accountId,
+    threadId: row.threadId,
+    inReplyTo: row.inReplyTo,
+    referencesHeader: row.referencesHeader,
     to: parseJsonArray(row.toJson),
     cc: parseJsonArray(row.ccJson),
     bcc: parseJsonArray(row.bccJson),
@@ -134,6 +141,9 @@ export async function createDraftEmail(input: {
   const row: DraftRow = {
     id: draftId,
     accountId,
+    threadId: null,
+    inReplyTo: null,
+    referencesHeader: null,
     toJson: JSON.stringify(input.to),
     ccJson: JSON.stringify(input.cc || []),
     bccJson: JSON.stringify(input.bcc || []),
@@ -162,6 +172,8 @@ function buildMimeMessage(draft: DraftEmailDTO) {
     `To: ${draft.to.join(', ')}`,
     ...(draft.cc.length ? [`Cc: ${draft.cc.join(', ')}`] : []),
     `Subject: ${draft.subject}`,
+    ...(draft.inReplyTo ? [`In-Reply-To: ${draft.inReplyTo}`] : []),
+    ...(draft.referencesHeader ? [`References: ${draft.referencesHeader}`] : []),
     'MIME-Version: 1.0',
     'Content-Type: text/plain; charset=UTF-8',
     '',
@@ -170,14 +182,14 @@ function buildMimeMessage(draft: DraftEmailDTO) {
   return headers.join('\r\n');
 }
 
-async function gmailSendRaw(accessToken: string, raw: string) {
+async function gmailSendRaw(accessToken: string, raw: string, threadId?: string | null) {
   const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ raw }),
+    body: JSON.stringify({ raw, ...(threadId ? { threadId } : {}) }),
   });
   const body = (await res.json()) as { id?: string; error?: unknown };
   if (!res.ok) {
@@ -186,16 +198,111 @@ async function gmailSendRaw(accessToken: string, raw: string) {
   return body;
 }
 
-async function gmailSendRawWithRefresh(accountId: string, raw: string) {
+async function gmailSendRawWithRefresh(accountId: string, raw: string, threadId?: string | null) {
   let accessToken = await getValidGoogleAccessToken(accountId);
   try {
-    return await gmailSendRaw(accessToken, raw);
+    return await gmailSendRaw(accessToken, raw, threadId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!message.startsWith('gmail_send_http_401')) throw error;
     accessToken = await forceRefreshGoogleAccessToken(accountId);
-    return await gmailSendRaw(accessToken, raw);
+    return await gmailSendRaw(accessToken, raw, threadId);
   }
+}
+
+function normalizeReplySubject(subject: string) {
+  const s = subject.trim();
+  if (!s) return 'Re: (No Subject)';
+  return /^re:/i.test(s) ? s : `Re: ${s}`;
+}
+
+function extractEmailAddress(value: string): string | null {
+  const m = value.match(/<([^>]+)>/);
+  if (m?.[1]) return m[1].trim();
+  const raw = value.split(',')[0]?.trim();
+  if (!raw) return null;
+  return /\S+@\S+\.\S+/.test(raw) ? raw.replace(/^["']|["']$/g, '') : null;
+}
+
+function quoteForReply(messages: Array<{ from: string; sentAt: string; bodyPreview: string }>) {
+  const last = messages[messages.length - 1];
+  if (!last) return '';
+  const quoted = (last.bodyPreview || '')
+    .split('\n')
+    .slice(0, 12)
+    .map((line) => `> ${line}`)
+    .join('\n');
+  return [``, `On ${new Date(last.sentAt).toLocaleString()}, ${last.from} wrote:`, quoted].join('\n');
+}
+
+export async function createReplyDraftFromThread(input: {
+  threadId: string;
+  accountId?: string;
+  prompt?: string;
+  tone?: 'professional' | 'friendly' | 'concise';
+  requestedBy?: string;
+}) {
+  const thread = await getGmailThread({ threadId: input.threadId, accountId: input.accountId });
+  const latest = thread.messages[thread.messages.length - 1];
+  if (!latest) throw new Error('thread_has_no_messages');
+
+  const replyToHeader = latest.replyTo || latest.from;
+  const toAddr = extractEmailAddress(replyToHeader);
+  if (!toAddr) throw new Error('thread_reply_recipient_not_found');
+
+  const prompt = (input.prompt || `Reply to thread: ${thread.subject}`).trim();
+  const tone = input.tone || 'professional';
+  const baseBody = generateBody({ prompt, tone, recipientName: toAddr.split('@')[0] });
+  const body = `${baseBody}${quoteForReply(thread.messages)}`;
+  const subject = normalizeReplySubject(thread.subject);
+  const referencesValue = [latest.referencesHeader, latest.messageIdHeader].filter(Boolean).join(' ').trim() || null;
+
+  const ts = now();
+  let accountId = input.accountId ?? null;
+  if (!accountId) {
+    const googleAccounts = await getConnectedAccountsByProvider('google');
+    accountId = googleAccounts[0]?.id ?? null;
+  }
+
+  const draftId = id('draft');
+  const approval = await prepareAction({
+    actionType: 'email.send',
+    targetType: 'draft_email',
+    targetRef: draftId,
+    payload: { subject, to: [toAddr], threadId: thread.id },
+    requestedBy: input.requestedBy || 'local-user',
+  });
+
+  const row: DraftRow = {
+    id: draftId,
+    accountId,
+    threadId: thread.id,
+    inReplyTo: latest.messageIdHeader || null,
+    referencesHeader: referencesValue,
+    toJson: JSON.stringify([toAddr]),
+    ccJson: JSON.stringify([]),
+    bccJson: JSON.stringify([]),
+    subject,
+    body,
+    sourcePrompt: prompt,
+    tone,
+    status: 'prepared',
+    approvalActionId: approval.id,
+    gmailMessageId: null,
+    errorDetails: null,
+    createdAt: ts,
+    updatedAt: ts,
+  };
+  await db.insert(draftEmails).values(row);
+
+  await writeAuditLog({
+    actionType: 'email_reply_draft_created',
+    targetType: 'email_thread',
+    targetRef: thread.id,
+    status: 'prepared',
+    details: { draftId, subject, to: [toAddr] },
+  });
+  return { draft: toDto(row), approvalAction: approval, thread };
 }
 
 export async function approveAndSendDraftEmail(input: { draftId: string; approvedBy?: string }) {
@@ -212,7 +319,7 @@ export async function approveAndSendDraftEmail(input: { draftId: string; approve
   try {
     const mime = buildMimeMessage(draft);
     const raw = base64UrlEncode(mime);
-    const sent = await gmailSendRawWithRefresh(draft.accountId, raw);
+    const sent = await gmailSendRawWithRefresh(draft.accountId, raw, draft.threadId);
 
     await transitionAction({ actionId: draft.approvalActionId, nextStatus: 'executed', approvedBy: input.approvedBy || 'local-user' });
     await db

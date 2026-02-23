@@ -151,6 +151,9 @@ export async function syncGoogleCalendar(accountId?: string) {
 export type DraftEmail = {
   id: string;
   accountId: string | null;
+  threadId: string | null;
+  inReplyTo: string | null;
+  referencesHeader: string | null;
   to: string[];
   cc: string[];
   bcc: string[];
@@ -185,6 +188,20 @@ export async function generateEmailDraft(input: {
   });
 }
 
+export async function generateReplyDraftFromThread(threadId: string, input?: {
+  accountId?: string;
+  prompt?: string;
+  tone?: 'professional' | 'friendly' | 'concise';
+}) {
+  return j<{ draft: DraftEmail; approvalAction: ApprovalAction; thread: GmailThread }>(
+    `/api/email/threads/${encodeURIComponent(threadId)}/reply-draft`,
+    {
+      method: 'POST',
+      body: JSON.stringify(input || {}),
+    },
+  );
+}
+
 export async function approveSendEmailDraft(draftId: string) {
   return j<{ draftId: string; gmailMessageId: string | null; status: string }>(`/api/email/drafts/${draftId}/approve-send`, {
     method: 'POST',
@@ -202,10 +219,14 @@ export type GmailThreadMessage = {
   id: string;
   from: string;
   to: string;
+  cc: string;
+  replyTo: string;
   subject: string;
   sentAt: string;
   snippet: string;
   bodyPreview: string;
+  messageIdHeader: string;
+  referencesHeader: string;
 };
 
 export type GmailThread = {

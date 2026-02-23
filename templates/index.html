@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ollama Chat</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <h1>Ollama Chat</h1>
+        <p>Model: {{ model }}</p>
+      </header>
+
+      <main id="chat"></main>
+
+      <form id="chat-form">
+        <textarea id="message" placeholder="Type your message..." rows="3" required></textarea>
+        <div class="actions">
+          <button type="submit">Send</button>
+          <button type="button" id="reset">Reset</button>
+        </div>
+      </form>
+    </div>
+
+    <script>
+      const chat = document.getElementById("chat");
+      const form = document.getElementById("chat-form");
+      const messageInput = document.getElementById("message");
+      const resetBtn = document.getElementById("reset");
+
+      function addMessage(role, text) {
+        const wrap = document.createElement("div");
+        wrap.className = `msg ${role}`;
+        wrap.innerHTML = `<strong>${role === "user" ? "You" : "Assistant"}</strong><p></p>`;
+        wrap.querySelector("p").textContent = text;
+        chat.appendChild(wrap);
+        chat.scrollTop = chat.scrollHeight;
+      }
+
+      async function sendMessage(text) {
+        const response = await fetch("/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text }),
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || "Request failed");
+        }
+
+        return data.reply;
+      }
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const text = messageInput.value.trim();
+        if (!text) return;
+
+        addMessage("user", text);
+        messageInput.value = "";
+        messageInput.focus();
+
+        const pending = document.createElement("div");
+        pending.className = "msg assistant pending";
+        pending.innerHTML = "<strong>Assistant</strong><p>Thinking...</p>";
+        chat.appendChild(pending);
+        chat.scrollTop = chat.scrollHeight;
+
+        try {
+          const reply = await sendMessage(text);
+          pending.remove();
+          addMessage("assistant", reply);
+        } catch (err) {
+          pending.remove();
+          addMessage("assistant", `Error: ${err.message}`);
+        }
+      });
+
+      resetBtn.addEventListener("click", async () => {
+        await fetch("/reset", { method: "POST" });
+        chat.innerHTML = "";
+      });
+    </script>
+  </body>
+</html>

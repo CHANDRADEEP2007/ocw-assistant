@@ -1,0 +1,15 @@
+{
+  "name": "ocw-assistant-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/ui",
+    "apps/sidecar"
+  ],
+  "scripts": {
+    "dev:ui": "npm --workspace @ocw/ui run dev",
+    "dev:sidecar": "npm --workspace @ocw/sidecar run dev",
+    "build:ui": "npm --workspace @ocw/ui run build",
+    "build:sidecar": "npm --workspace @ocw/sidecar run build"
+  }
+}

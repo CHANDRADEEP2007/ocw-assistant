@@ -34,7 +34,40 @@ function slashSuggestions(input: string) {
   return q.startsWith('/') ? all.filter((x) => x.startsWith(q)).slice(0, 5) : [];
 }
 
+function formatDateTimeLabel(value: string) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+}
+
+function formatTimeRange(start: string, end: string) {
+  const s = new Date(start);
+  const e = new Date(end);
+  if (Number.isNaN(s.getTime()) || Number.isNaN(e.getTime())) return `${start} -> ${end}`;
+  return `${s.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} - ${e.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+}
+
 export default function App() {
+  type CalendarPreviewCard =
+    | {
+        id: string;
+        kind: 'today';
+        title: string;
+        summary: string;
+        metrics: { totalEvents: number; hardConflicts: number; softConflicts: number; backToBackChains: number };
+        focusBlocks: Array<{ startAt: string; endAt: string; minutes: number }>;
+        topEvents: Array<{ startAt: string; title: string; calendarName?: string }>;
+      }
+    | {
+        id: string;
+        kind: 'week';
+        title: string;
+        summary: string;
+        metrics: { totalEvents: number; hardConflicts: number; softConflicts: number };
+        conflicts: Array<{ type: string; explanation: string }>;
+        prepSuggestions: string[];
+      };
+
   type EmailPreviewCard =
     | {
         id: string;
@@ -79,6 +112,7 @@ export default function App() {
   const [emailStatus, setEmailStatus] = useState('');
   const [emailThreadQuery, setEmailThreadQuery] = useState('in:inbox newer_than:14d');
   const [emailThreadResults, setEmailThreadResults] = useState<Array<{ id: string; snippet: string }>>([]);
+  const [calendarPreviewCards, setCalendarPreviewCards] = useState<CalendarPreviewCard[]>([]);
   const [emailPreviewCards, setEmailPreviewCards] = useState<EmailPreviewCard[]>([]);
   const [isPending, startTransition] = useTransition();
 
@@ -302,6 +336,23 @@ export default function App() {
       try {
         const [day, summaryRes] = await Promise.all([calendarToday(), calendarSummary('today')]);
         const summary = summaryRes.summary;
+        setCalendarPreviewCards((prev) => [
+          {
+            id: `cal_today_${summary.date}`,
+            kind: 'today',
+            title: 'Calendar Today Preview',
+            summary: summary.conciseSummary,
+            metrics: {
+              totalEvents: summary.totalEvents,
+              hardConflicts: summary.hardConflicts,
+              softConflicts: summary.softConflicts,
+              backToBackChains: summary.backToBackChains,
+            },
+            focusBlocks: summary.focusBlockSuggestions,
+            topEvents: day.events.slice(0, 6).map((e) => ({ startAt: e.startAt, title: e.title, calendarName: e.calendarName })),
+          },
+          ...prev.filter((c) => c.id !== `cal_today_${summary.date}`).slice(0, 5),
+        ]);
         setMessages((prev) => [
           ...prev,
           toChatMessage(
@@ -329,6 +380,22 @@ export default function App() {
       try {
         const [week, summaryRes] = await Promise.all([calendarWeek(), calendarSummary('week')]);
         const summary = summaryRes.summary;
+        setCalendarPreviewCards((prev) => [
+          {
+            id: `cal_week_${summary.date}`,
+            kind: 'week',
+            title: 'Calendar Week Preview',
+            summary: summary.conciseSummary,
+            metrics: {
+              totalEvents: summary.totalEvents,
+              hardConflicts: summary.hardConflicts,
+              softConflicts: summary.softConflicts,
+            },
+            conflicts: week.conflicts.slice(0, 6).map((c) => ({ type: c.type, explanation: c.explanation })),
+            prepSuggestions: summary.prepSuggestions.slice(0, 6),
+          },
+          ...prev.filter((c) => c.id !== `cal_week_${summary.date}`).slice(0, 5),
+        ]);
         setMessages((prev) => [
           ...prev,
           toChatMessage(
@@ -409,6 +476,92 @@ export default function App() {
           <section className="chat-canvas">
             <div className="section-head">Conversation Thread</div>
             <div className="message-list">
+              {calendarPreviewCards.length > 0 && (
+                <div className="calendar-preview-stack">
+                  {calendarPreviewCards.map((card) => (
+                    <div key={card.id} className="calendar-card">
+                      <div className="calendar-card-head">
+                        <div>
+                          <div className="calendar-card-title">{card.title}</div>
+                          <div className="calendar-card-summary">{card.summary}</div>
+                        </div>
+                        <div className="calendar-card-badges">
+                          <span className="calendar-badge neutral">Events {card.metrics.totalEvents}</span>
+                          <span className={`calendar-badge ${card.metrics.hardConflicts > 0 ? 'danger' : 'neutral'}`}>Hard {card.metrics.hardConflicts}</span>
+                          <span className={`calendar-badge ${card.metrics.softConflicts > 0 ? 'warn' : 'neutral'}`}>Soft {card.metrics.softConflicts}</span>
+                          {'backToBackChains' in card.metrics && (
+                            <span className={`calendar-badge ${card.metrics.backToBackChains > 0 ? 'accent' : 'neutral'}`}>Back-to-back {card.metrics.backToBackChains}</span>
+                          )}
+                        </div>
+                      </div>
+
+                      {card.kind === 'today' && (
+                        <div className="calendar-card-grid">
+                          <div className="calendar-panel">
+                            <div className="calendar-panel-title">Agenda</div>
+                            <div className="agenda-list">
+                              {card.topEvents.length === 0 && <div className="agenda-empty">No events</div>}
+                              {card.topEvents.map((e, idx) => (
+                                <div className="agenda-row" key={`${card.id}_${idx}`}>
+                                  <div className="agenda-time">{formatDateTimeLabel(e.startAt)}</div>
+                                  <div className="agenda-dot" />
+                                  <div className="agenda-body">
+                                    <div className="agenda-title">{e.title}</div>
+                                    <div className="agenda-sub">{e.calendarName || 'Unified Calendar'}</div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="calendar-panel">
+                            <div className="calendar-panel-title">Focus Blocks</div>
+                            <div className="focus-list">
+                              {card.focusBlocks.length === 0 && <div className="agenda-empty">No 60m+ focus blocks</div>}
+                              {card.focusBlocks.map((f, idx) => (
+                                <div className="focus-row" key={`${card.id}_f_${idx}`}>
+                                  <div className="focus-range">{formatTimeRange(f.startAt, f.endAt)}</div>
+                                  <div className="focus-minutes">{f.minutes}m</div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {card.kind === 'week' && (
+                        <div className="calendar-card-grid">
+                          <div className="calendar-panel">
+                            <div className="calendar-panel-title">Conflicts</div>
+                            <div className="agenda-list">
+                              {card.conflicts.length === 0 && <div className="agenda-empty">No conflicts found</div>}
+                              {card.conflicts.map((c, idx) => (
+                                <div className="conflict-row" key={`${card.id}_c_${idx}`}>
+                                  <span className={`calendar-badge ${c.type === 'hard' ? 'danger' : 'warn'}`}>{c.type}</span>
+                                  <div className="conflict-text">{c.explanation}</div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="calendar-panel">
+                            <div className="calendar-panel-title">Prep Suggestions</div>
+                            <div className="prep-list">
+                              {card.prepSuggestions.length === 0 && <div className="agenda-empty">No prep suggestions</div>}
+                              {card.prepSuggestions.map((p, idx) => (
+                                <div className="prep-row" key={`${card.id}_p_${idx}`}>
+                                  <span className="prep-icon">•</span>
+                                  <div className="prep-text">{p}</div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
               {emailPreviewCards.length > 0 && (
                 <div style={{ display: 'grid', gap: 8 }}>
                   {emailPreviewCards.map((card) => (

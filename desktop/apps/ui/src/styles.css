@@ -116,6 +116,167 @@ body {
 }
 .inline-card.success { border-color: #cde8d8; background: #f4fff8; }
 .inline-card-title { font-weight: 800; margin-bottom: 6px; }
+.calendar-preview-stack { display: grid; gap: 10px; }
+.calendar-card {
+  border: 1px solid #d5e2f2;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.85);
+  padding: 12px;
+}
+.calendar-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.calendar-card-title {
+  font-weight: 800;
+  font-size: 14px;
+  color: #14233a;
+}
+.calendar-card-summary {
+  margin-top: 3px;
+  color: #4c5f78;
+  font-size: 13px;
+}
+.calendar-card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.calendar-badge {
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 11px;
+  font-weight: 800;
+  border: 1px solid transparent;
+}
+.calendar-badge.neutral { background: #f3f6fa; color: #4b5f77; border-color: #dbe4ef; }
+.calendar-badge.accent { background: #eaf6f4; color: #0f6f68; border-color: #cce9e3; }
+.calendar-badge.warn { background: #fff6e8; color: #9a6508; border-color: #f2dfb4; }
+.calendar-badge.danger { background: #fff0f0; color: #b33636; border-color: #f2caca; }
+.calendar-card-grid {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  gap: 10px;
+}
+.calendar-panel {
+  border: 1px solid #e1e9f3;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.88);
+  padding: 10px;
+}
+.calendar-panel-title {
+  font-size: 11px;
+  font-weight: 800;
+  color: #5b6e86;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  margin-bottom: 8px;
+}
+.agenda-list, .focus-list, .prep-list {
+  display: grid;
+  gap: 8px;
+}
+.agenda-empty {
+  color: #7c8ea6;
+  font-size: 12px;
+  border: 1px dashed #dde6f1;
+  border-radius: 10px;
+  padding: 10px;
+  background: #fbfdff;
+}
+.agenda-row {
+  display: grid;
+  grid-template-columns: 110px 10px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+.agenda-time {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: #4f647d;
+  white-space: nowrap;
+}
+.agenda-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #4791ff, #1f67da);
+  box-shadow: 0 0 0 3px rgba(71,145,255,0.16);
+}
+.agenda-body {
+  min-width: 0;
+  border: 1px solid #e2eaf5;
+  border-radius: 10px;
+  padding: 7px 9px;
+  background: #fff;
+}
+.agenda-title {
+  font-weight: 700;
+  color: #1a2740;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agenda-sub {
+  margin-top: 2px;
+  color: #647790;
+  font-size: 12px;
+}
+.focus-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #dbe9e5;
+  background: #f5fcfa;
+  border-radius: 10px;
+  padding: 8px 9px;
+}
+.focus-range {
+  color: #1f3c39;
+  font-weight: 700;
+  font-size: 12px;
+}
+.focus-minutes {
+  color: #0f6f68;
+  font-weight: 800;
+  font-size: 11px;
+  border: 1px solid #cce9e3;
+  background: #eaf6f4;
+  padding: 3px 7px;
+  border-radius: 999px;
+}
+.conflict-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  border: 1px solid #e5ebf3;
+  border-radius: 10px;
+  background: #fff;
+  padding: 8px 9px;
+}
+.conflict-text {
+  color: #32455d;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.prep-row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  border-bottom: 1px solid #eef2f7;
+  padding-bottom: 6px;
+}
+.prep-row:last-child { border-bottom: none; padding-bottom: 0; }
+.prep-icon { color: #0b63d0; font-weight: 800; }
+.prep-text { color: #304158; font-size: 12px; line-height: 1.35; }
 .action-list, .audit-list { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow: auto; }
 .action-row {
   display: flex; justify-content: space-between; gap: 8px; border: 1px solid #e6edf5; border-radius: 12px; padding: 8px; background: #fff;
@@ -143,4 +304,7 @@ code { font-family: 'IBM Plex Mono', monospace; }
   .topbar { flex-direction: column; align-items: flex-start; }
   .topbar-right { width: 100%; }
   .status-pill { max-width: 100%; }
+  .calendar-card-grid { grid-template-columns: 1fr; }
+  .agenda-row { grid-template-columns: 1fr; }
+  .agenda-dot { display: none; }
 }

@@ -100,6 +100,17 @@ curl -X POST http://127.0.0.1:5001/v1/chat/completions \
   }'
 ```
 
+## Desktop Replatform (OCW Assistant)
+
+A local-first desktop assistant foundation is included under `desktop/` with:
+
+- Tauri + React UI shell
+- Node sidecar runtime (Express + SQLite + Drizzle)
+- Google OAuth desktop flow + Google Calendar sync
+- Gmail draft/send (approval-based) + thread search/read
+
+See `desktop/QUICKSTART.md` and `DESKTOP_STATUS.md`.
+
 ## Tests
 
 ```bash

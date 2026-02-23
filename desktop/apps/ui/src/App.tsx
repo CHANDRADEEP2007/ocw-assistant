@@ -49,6 +49,20 @@ function formatTimeRange(start: string, end: string) {
   return `${s.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} - ${e.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
 }
 
+function startOfWeek(date: Date) {
+  const d = new Date(date);
+  const day = d.getDay();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - day);
+  return d;
+}
+
+function addDays(date: Date, days: number) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
 export default function App() {
   type CalendarPreviewCard =
     | {
@@ -501,6 +515,31 @@ export default function App() {
     return acc;
   }, {});
   const weekDayKeys = Object.keys(weekEventsByDay).sort();
+  const calendarAnchorDate = weekDayKeys[0] ? new Date(`${weekDayKeys[0]}T00:00:00`) : new Date();
+  const calendarWeekStart = startOfWeek(calendarAnchorDate);
+  const calendarWeekDays = Array.from({ length: 7 }, (_, i) => addDays(calendarWeekStart, i));
+  const calendarHourStart = 7;
+  const calendarHourEnd = 21;
+  const calendarHourCount = calendarHourEnd - calendarHourStart;
+  const hourRowHeight = 56;
+  const calendarGridHeight = calendarHourCount * hourRowHeight;
+  const hardConflictEventIds = new Set(
+    (weekData?.conflicts || []).filter((c) => c.type === 'hard').flatMap((c) => c.eventIds),
+  );
+
+  function getEventLayout(ev: CalendarEvent) {
+    const start = new Date(ev.startAt);
+    const end = new Date(ev.endAt);
+    const startMinutes = start.getHours() * 60 + start.getMinutes();
+    const endMinutes = end.getHours() * 60 + end.getMinutes();
+    const minMinutes = calendarHourStart * 60;
+    const maxMinutes = calendarHourEnd * 60;
+    const clampedStart = Math.max(minMinutes, Math.min(startMinutes, maxMinutes - 15));
+    const clampedEnd = Math.max(clampedStart + 15, Math.min(endMinutes, maxMinutes));
+    const top = ((clampedStart - minMinutes) / 60) * hourRowHeight;
+    const height = Math.max(20, ((clampedEnd - clampedStart) / 60) * hourRowHeight - 2);
+    return { top, height };
+  }
 
   const renderCalendarWorkspace = () => (
     <div className="calendar-workspace">
@@ -508,13 +547,37 @@ export default function App() {
         <div>
           <div className="calendar-workspace-title">Unified Calendar</div>
           <div className="calendar-workspace-sub">
-            Google Calendar MVP unified view (multi-calendar). Outlook support slots into the same timeline later.
+            Single calendar view across all connected accounts/calendars. Today it aggregates Google calendars; Outlook will join this same timeline next.
           </div>
         </div>
         <div className="calendar-workspace-actions">
           <button onClick={() => void refreshCalendarPanel('today')}>Refresh Today</button>
           <button onClick={() => void refreshCalendarPanel('week')}>Refresh Week</button>
         </div>
+      </div>
+
+      <div className="provider-connect-strip">
+        <button className={`provider-connect-btn ${accounts.some((a) => a.provider === 'google') ? 'connected' : ''}`} onClick={() => void startGoogleConnect()} disabled={!googleConfigured}>
+          <span className="provider-avatar google">G</span>
+          <span className="provider-connect-body">
+            <span className="provider-connect-title">Connect Gmail</span>
+            <span className="provider-connect-sub">{accounts.some((a) => a.provider === 'google') ? 'Connected via Google OAuth' : 'Use your Google account'}</span>
+          </span>
+        </button>
+        <button className={`provider-connect-btn ${accounts.some((a) => a.provider === 'google') ? 'connected' : ''}`} onClick={() => void startGoogleConnect()} disabled={!googleConfigured}>
+          <span className="provider-avatar calendar">23</span>
+          <span className="provider-connect-body">
+            <span className="provider-connect-title">Connect Google Calendar</span>
+            <span className="provider-connect-sub">{accounts.some((a) => a.provider === 'google') ? 'Ready to sync unified events' : 'Google OAuth required'}</span>
+          </span>
+        </button>
+        <button className="provider-connect-btn muted" disabled>
+          <span className="provider-avatar outlook">O</span>
+          <span className="provider-connect-body">
+            <span className="provider-connect-title">Connect Outlook</span>
+            <span className="provider-connect-sub">Coming soon (same unified calendar view)</span>
+          </span>
+        </button>
       </div>
 
       <div className="calendar-workspace-summary-grid">
@@ -553,31 +616,113 @@ export default function App() {
       </div>
 
       <div className="calendar-hybrid-grid">
-        <div className="calendar-week-board">
-          <div className="calendar-panel-title">Week Grid (Agenda Hybrid)</div>
-          {weekDayKeys.length === 0 && <div className="agenda-empty">No week data loaded</div>}
-          {weekDayKeys.map((dayKey) => (
-            <div key={dayKey} className="week-day-column">
-              <div className="week-day-header">
-                {new Date(`${dayKey}T00:00:00`).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}
-              </div>
-              <div className="week-day-events">
-                {(weekEventsByDay[dayKey] || [])
-                  .slice()
-                  .sort((a, b) => (a.startAt < b.startAt ? -1 : 1))
-                  .map((e) => (
-                    <div key={e.id} className={`week-event-chip ${e.status === 'tentative' ? 'tentative' : ''}`}>
-                      <div className="week-event-time">{formatTimeRange(e.startAt, e.endAt)}</div>
-                      <div className="week-event-title">{e.title}</div>
-                      <div className="week-event-sub">{e.calendarName || e.provider}</div>
-                    </div>
-                  ))}
+        <div className="calendar-week-board pro-calendar-board">
+          <div className="calendar-top-toolbar">
+            <div className="calendar-toolbar-left">
+              <button className="mini-icon-btn" onClick={() => void refreshCalendarPanel('week')}>↻</button>
+              <button className="calendar-nav-btn">Today</button>
+              <button className="mini-icon-btn">‹</button>
+              <button className="mini-icon-btn">›</button>
+              <div className="calendar-month-label">
+                {calendarWeekDays[0].toLocaleDateString([], { month: 'long', year: 'numeric' })}
               </div>
             </div>
-          ))}
+            <div className="calendar-toolbar-right">
+              <span className="calendar-view-pill">Week</span>
+              {accounts.filter((a) => a.provider === 'google').map((a) => (
+                <span key={a.id} className="source-pill">
+                  <span className="provider-avatar tiny google">G</span>
+                  {a.accountEmail || 'Google'}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <div className="calendar-grid-shell">
+            <div className="calendar-grid-head">
+              <div className="time-header-cell" />
+              {calendarWeekDays.map((day) => {
+                const key = day.toISOString().slice(0, 10);
+                const isToday = key === new Date().toISOString().slice(0, 10);
+                return (
+                  <div key={`head_${key}`} className={`day-header-cell ${isToday ? 'today' : ''}`}>
+                    <div className="day-header-weekday">{day.toLocaleDateString([], { weekday: 'short' }).toUpperCase()}</div>
+                    <div className="day-header-date">{day.getDate()}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="calendar-grid-body" style={{ height: calendarGridHeight }}>
+              <div className="time-column">
+                {Array.from({ length: calendarHourCount }, (_, i) => {
+                  const hour = calendarHourStart + i;
+                  const label = new Date(2026, 0, 1, hour, 0).toLocaleTimeString([], { hour: 'numeric' });
+                  return (
+                    <div key={`t_${hour}`} className="time-slot-label" style={{ height: hourRowHeight }}>
+                      {label}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="days-grid-wrap">
+                <div className="hour-lines">
+                  {Array.from({ length: calendarHourCount + 1 }, (_, i) => (
+                    <div key={`line_${i}`} className="hour-line" style={{ top: i * hourRowHeight }} />
+                  ))}
+                </div>
+                <div className="day-columns">
+                  {calendarWeekDays.map((day) => {
+                    const dayKey = day.toISOString().slice(0, 10);
+                    const dayEvents = (weekEventsByDay[dayKey] || [])
+                      .slice()
+                      .sort((a, b) => (a.startAt < b.startAt ? -1 : 1));
+                    return (
+                      <div key={`col_${dayKey}`} className="day-column">
+                        {dayEvents.map((e) => {
+                          const layout = getEventLayout(e);
+                          const conflict = hardConflictEventIds.has(e.id);
+                          return (
+                            <div
+                              key={e.id}
+                              className={`calendar-event-block ${e.status === 'tentative' ? 'tentative' : ''} ${conflict ? 'conflict' : ''}`}
+                              style={{ top: layout.top, height: layout.height }}
+                              title={`${e.title}\n${formatTimeRange(e.startAt, e.endAt)}`}
+                            >
+                              <div className="calendar-event-time">{formatTimeRange(e.startAt, e.endAt)}</div>
+                              <div className="calendar-event-title">{e.title}</div>
+                              <div className="calendar-event-meta">{e.calendarName || e.provider}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div className="calendar-agenda-side">
+          <div className="calendar-panel-title">Connected Sources</div>
+          <div className="connected-sources-list">
+            {accounts.length === 0 && <div className="agenda-empty">No accounts connected yet</div>}
+            {accounts.map((acct) => (
+              <div className="connected-source-row" key={`source_${acct.id}`}>
+                <div className="connected-source-main">
+                  <span className={`provider-avatar tiny ${acct.provider === 'google' ? 'google' : 'outlook'}`}>{acct.provider === 'google' ? 'G' : 'O'}</span>
+                  <div>
+                    <div className="connected-source-title">{acct.provider === 'google' ? 'Google (Gmail + Calendar)' : acct.provider}</div>
+                    <div className="connected-source-sub">{acct.accountEmail || acct.id}</div>
+                  </div>
+                </div>
+                <button onClick={() => acct.provider === 'google' ? void runGoogleCalendarSync(acct.id) : undefined} disabled={acct.provider !== 'google'}>Sync</button>
+              </div>
+            ))}
+          </div>
+
           <div className="calendar-panel-title">Today Agenda</div>
           <div className="agenda-list">
             {!todayData?.events?.length && <div className="agenda-empty">No today data loaded</div>}
@@ -880,18 +1025,29 @@ export default function App() {
 
         <aside className="ops-panel">
           <div className="ops-card">
-            <div className="section-head">Google Connect (MVP)</div>
+            <div className="section-head">Connections</div>
             <div className="muted small">
-              {googleConfigured === null
-                ? 'Checking Google OAuth config...'
-                : googleConfigured
-                  ? 'Google OAuth configured'
-                  : 'Set GOOGLE_CLIENT_ID in sidecar env to enable connect'}
+              Click a provider to connect. Google powers both Gmail and Google Calendar in the unified view.
             </div>
-            <div className="small mono" style={{ marginTop: 6, wordBreak: 'break-all' }}>Redirect: {googleRedirectUri || 'n/a'}</div>
+            <div className="small mono" style={{ marginTop: 6, wordBreak: 'break-all' }}>Google Redirect: {googleRedirectUri || 'n/a'}</div>
+            <div className="provider-connect-stack" style={{ marginTop: 8 }}>
+              <button className={`provider-connect-btn ${accounts.some((a) => a.provider === 'google') ? 'connected' : ''}`} onClick={() => void startGoogleConnect()} disabled={!googleConfigured}>
+                <span className="provider-avatar google">G</span>
+                <span className="provider-connect-body">
+                  <span className="provider-connect-title">Google Account</span>
+                  <span className="provider-connect-sub">{googleConfigured ? 'Connect Gmail + Calendar' : 'Set Google OAuth env first'}</span>
+                </span>
+              </button>
+              <button className="provider-connect-btn muted" disabled>
+                <span className="provider-avatar outlook">O</span>
+                <span className="provider-connect-body">
+                  <span className="provider-connect-title">Microsoft Account</span>
+                  <span className="provider-connect-sub">Outlook Mail + Calendar (coming soon)</span>
+                </span>
+              </button>
+            </div>
             <div className="action-buttons" style={{ marginTop: 8 }}>
-              <button onClick={() => void startGoogleConnect()} disabled={!googleConfigured}>Start Google Connect</button>
-              <button onClick={() => void runGoogleCalendarSync()} disabled={!accounts.some((a) => a.provider === 'google')}>Sync Google Calendar</button>
+              <button onClick={() => void runGoogleCalendarSync()} disabled={!accounts.some((a) => a.provider === 'google')}>Sync Unified Calendar</button>
             </div>
             {calendarSyncStatus && <div className="muted small" style={{ marginTop: 6 }}>{calendarSyncStatus}</div>}
             {oauthUrl && (

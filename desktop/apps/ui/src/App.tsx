@@ -1,4 +1,5 @@
-import { useEffect, useState, useTransition } from 'react';
+import { useEffect, useRef, useState, useTransition } from 'react';
+import type { ChangeEvent } from 'react';
 
 import { InlineCard } from './components/InlineCard';
 import {
@@ -6,7 +7,6 @@ import {
   calendarToday,
   calendarWeek,
   chat,
-  disconnectAccount,
   generateEmailDraft,
   generateReplyDraftFromThread,
   getGmailThread,
@@ -108,7 +108,7 @@ export default function App() {
       };
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [workspaceView, setWorkspaceView] = useState<'assistant' | 'calendar' | 'drafts' | 'projects' | 'settings'>('assistant');
+  const [workspaceView, setWorkspaceView] = useState<'assistant' | 'calendar' | 'drafts' | 'tools' | 'actions' | 'audit' | 'projects' | 'settings'>('assistant');
   const [composer, setComposer] = useState('');
   const [model, setModel] = useState('llama3:8b');
   const [mode, setMode] = useState<'quick' | 'deep'>('quick');
@@ -122,6 +122,10 @@ export default function App() {
   const [oauthUrl, setOauthUrl] = useState('');
   const [oauthState, setOauthState] = useState('');
   const [oauthCode, setOauthCode] = useState('');
+  const [showConnectModal, setShowConnectModal] = useState(false);
+  const [connectProvider, setConnectProvider] = useState<'google' | 'outlook'>('google');
+  const [toolsDrawerOpen, setToolsDrawerOpen] = useState(false);
+  const [attachedFiles, setAttachedFiles] = useState<Array<{ id: string; name: string; size: number; type: string }>>([]);
   const [calendarSyncStatus, setCalendarSyncStatus] = useState('');
   const [emailDrafts, setEmailDrafts] = useState<Array<{ id: string; subject: string; status: string; to: string[]; body: string; approvalActionId: string | null; threadId?: string | null }>>([]);
   const [emailTo, setEmailTo] = useState('recipient@example.com');
@@ -137,7 +141,9 @@ export default function App() {
   const [weekData, setWeekData] = useState<{ events: CalendarEvent[]; conflicts: CalendarConflict[] } | null>(null);
   const [todaySummary, setTodaySummary] = useState<CalendarSummary | null>(null);
   const [weekSummary, setWeekSummary] = useState<CalendarSummary | null>(null);
+  const [calendarSideTab, setCalendarSideTab] = useState<'today_agenda' | 'today_overview' | 'week_overview'>('today_agenda');
   const [isPending, startTransition] = useTransition();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const suggestions = slashSuggestions(composer);
   const tokenEstimate = Math.max(1, Math.floor((messages.map((m) => m.content).join('\n').length + composer.length) / 4));
@@ -184,6 +190,40 @@ export default function App() {
     }
   }
 
+  function openConnectModal(provider: 'google' | 'outlook') {
+    setConnectProvider(provider);
+    setShowConnectModal(true);
+  }
+
+  function onAttachClick() {
+    fileInputRef.current?.click();
+  }
+
+  function onFileInputChange(e: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    setAttachedFiles((prev) => {
+      const existing = new Set(prev.map((f) => `${f.name}:${f.size}`));
+      const next = [...prev];
+      for (const file of files) {
+        const key = `${file.name}:${file.size}`;
+        if (existing.has(key)) continue;
+        next.push({
+          id: `${file.name}_${file.size}_${Math.random().toString(36).slice(2, 8)}`,
+          name: file.name,
+          size: file.size,
+          type: file.type || 'application/octet-stream',
+        });
+      }
+      return next.slice(0, 12);
+    });
+    e.currentTarget.value = '';
+  }
+
+  function removeAttachedFile(id: string) {
+    setAttachedFiles((prev) => prev.filter((f) => f.id !== id));
+  }
+
   async function completeGoogleConnect() {
     if (!oauthState.trim() || !oauthCode.trim()) return;
     try {
@@ -195,6 +235,7 @@ export default function App() {
       setOauthCode('');
       setOauthUrl('');
       setOauthState('');
+      setShowConnectModal(false);
       await refreshOps();
     } catch (err) {
       setMessages((prev) => [...prev, toChatMessage('assistant', `Google OAuth complete error: ${String(err)}`)]);
@@ -287,6 +328,20 @@ export default function App() {
       setEmailStatus(`Reply draft failed: ${String(err)}`);
       setMessages((prev) => [...prev, toChatMessage('assistant', `Reply draft error: ${String(err)}`)]);
     }
+  }
+
+  function insertDraftIntoComposer(input: { subject: string; body: string; to?: string[] }) {
+    setComposer(
+      [
+        `Email Draft`,
+        `Subject: ${input.subject}`,
+        ...(input.to?.length ? [`To: ${input.to.join(', ')}`] : []),
+        '',
+        input.body,
+      ].join('\n'),
+    );
+    setWorkspaceView('assistant');
+    setEmailStatus('Draft inserted into composer');
   }
 
   async function approveAndSendDraft(draftId: string) {
@@ -507,6 +562,9 @@ export default function App() {
           setMessages((prev) => [...prev, toChatMessage('assistant', `Error: ${String(err)}`)]);
         });
     });
+
+    // Clear attachments after submitting the prompt to keep composer state predictable.
+    setAttachedFiles([]);
   }
 
   const weekEventsByDay = (weekData?.events || []).reduce<Record<string, CalendarEvent[]>>((acc, ev) => {
@@ -526,6 +584,15 @@ export default function App() {
   const hardConflictEventIds = new Set(
     (weekData?.conflicts || []).filter((c) => c.type === 'hard').flatMap((c) => c.eventIds),
   );
+  const uniqueDraftsForDisplay = (() => {
+    const seen = new Set<string>();
+    return emailDrafts.filter((d) => {
+      const key = `${d.subject}::${d.to.join(',')}::${d.body.trim()}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  })();
 
   function getEventLayout(ev: CalendarEvent) {
     const start = new Date(ev.startAt);
@@ -556,65 +623,6 @@ export default function App() {
         </div>
       </div>
 
-      <div className="provider-connect-strip">
-        <button className={`provider-connect-btn ${accounts.some((a) => a.provider === 'google') ? 'connected' : ''}`} onClick={() => void startGoogleConnect()} disabled={!googleConfigured}>
-          <span className="provider-avatar google">G</span>
-          <span className="provider-connect-body">
-            <span className="provider-connect-title">Connect Gmail</span>
-            <span className="provider-connect-sub">{accounts.some((a) => a.provider === 'google') ? 'Connected via Google OAuth' : 'Use your Google account'}</span>
-          </span>
-        </button>
-        <button className={`provider-connect-btn ${accounts.some((a) => a.provider === 'google') ? 'connected' : ''}`} onClick={() => void startGoogleConnect()} disabled={!googleConfigured}>
-          <span className="provider-avatar calendar">23</span>
-          <span className="provider-connect-body">
-            <span className="provider-connect-title">Connect Google Calendar</span>
-            <span className="provider-connect-sub">{accounts.some((a) => a.provider === 'google') ? 'Ready to sync unified events' : 'Google OAuth required'}</span>
-          </span>
-        </button>
-        <button className="provider-connect-btn muted" disabled>
-          <span className="provider-avatar outlook">O</span>
-          <span className="provider-connect-body">
-            <span className="provider-connect-title">Connect Outlook</span>
-            <span className="provider-connect-sub">Coming soon (same unified calendar view)</span>
-          </span>
-        </button>
-      </div>
-
-      <div className="calendar-workspace-summary-grid">
-        <div className="calendar-summary-panel">
-          <div className="calendar-panel-title">Today Overview</div>
-          {todaySummary ? (
-            <>
-              <div className="calendar-workspace-summary-text">{todaySummary.conciseSummary}</div>
-              <div className="calendar-inline-metrics">
-                <span className="calendar-badge neutral">Events {todaySummary.totalEvents}</span>
-                <span className={`calendar-badge ${todaySummary.hardConflicts ? 'danger' : 'neutral'}`}>Hard {todaySummary.hardConflicts}</span>
-                <span className={`calendar-badge ${todaySummary.softConflicts ? 'warn' : 'neutral'}`}>Soft {todaySummary.softConflicts}</span>
-                <span className={`calendar-badge ${todaySummary.backToBackChains ? 'accent' : 'neutral'}`}>Back-to-back {todaySummary.backToBackChains}</span>
-              </div>
-            </>
-          ) : (
-            <div className="agenda-empty">Run `/today` or click Refresh Today</div>
-          )}
-        </div>
-
-        <div className="calendar-summary-panel">
-          <div className="calendar-panel-title">Week Overview</div>
-          {weekSummary ? (
-            <>
-              <div className="calendar-workspace-summary-text">{weekSummary.conciseSummary}</div>
-              <div className="calendar-inline-metrics">
-                <span className="calendar-badge neutral">Events {weekSummary.totalEvents}</span>
-                <span className={`calendar-badge ${weekSummary.hardConflicts ? 'danger' : 'neutral'}`}>Hard {weekSummary.hardConflicts}</span>
-                <span className={`calendar-badge ${weekSummary.softConflicts ? 'warn' : 'neutral'}`}>Soft {weekSummary.softConflicts}</span>
-              </div>
-            </>
-          ) : (
-            <div className="agenda-empty">Run `/week` or click Refresh Week</div>
-          )}
-        </div>
-      </div>
-
       <div className="calendar-hybrid-grid">
         <div className="calendar-week-board pro-calendar-board">
           <div className="calendar-top-toolbar">
@@ -629,12 +637,6 @@ export default function App() {
             </div>
             <div className="calendar-toolbar-right">
               <span className="calendar-view-pill">Week</span>
-              {accounts.filter((a) => a.provider === 'google').map((a) => (
-                <span key={a.id} className="source-pill">
-                  <span className="provider-avatar tiny google">G</span>
-                  {a.accountEmail || 'Google'}
-                </span>
-              ))}
             </div>
           </div>
 
@@ -706,48 +708,77 @@ export default function App() {
         </div>
 
         <div className="calendar-agenda-side">
-          <div className="calendar-panel-title">Connected Sources</div>
-          <div className="connected-sources-list">
-            {accounts.length === 0 && <div className="agenda-empty">No accounts connected yet</div>}
-            {accounts.map((acct) => (
-              <div className="connected-source-row" key={`source_${acct.id}`}>
-                <div className="connected-source-main">
-                  <span className={`provider-avatar tiny ${acct.provider === 'google' ? 'google' : 'outlook'}`}>{acct.provider === 'google' ? 'G' : 'O'}</span>
-                  <div>
-                    <div className="connected-source-title">{acct.provider === 'google' ? 'Google (Gmail + Calendar)' : acct.provider}</div>
-                    <div className="connected-source-sub">{acct.accountEmail || acct.id}</div>
+          <div className="calendar-side-tabs">
+            <button className={calendarSideTab === 'today_agenda' ? 'active' : ''} onClick={() => setCalendarSideTab('today_agenda')}>Today Agenda</button>
+            <button className={calendarSideTab === 'today_overview' ? 'active' : ''} onClick={() => setCalendarSideTab('today_overview')}>Today Overview</button>
+            <button className={calendarSideTab === 'week_overview' ? 'active' : ''} onClick={() => setCalendarSideTab('week_overview')}>Week Overview</button>
+          </div>
+
+          {calendarSideTab === 'today_agenda' && (
+            <>
+              <div className="calendar-panel-title">Today Agenda</div>
+              <div className="agenda-list">
+                {!todayData?.events?.length && <div className="agenda-empty">No today data loaded</div>}
+                {(todayData?.events || []).slice(0, 12).map((e) => (
+                  <div className="agenda-row" key={`panel_${e.id}`}>
+                    <div className="agenda-time">{formatTimeRange(e.startAt, e.endAt)}</div>
+                    <div className="agenda-dot" />
+                    <div className="agenda-body">
+                      <div className="agenda-title">{e.title}</div>
+                      <div className="agenda-sub">{e.calendarName || e.provider}</div>
+                    </div>
                   </div>
-                </div>
-                <button onClick={() => acct.provider === 'google' ? void runGoogleCalendarSync(acct.id) : undefined} disabled={acct.provider !== 'google'}>Sync</button>
+                ))}
               </div>
-            ))}
-          </div>
+            </>
+          )}
 
-          <div className="calendar-panel-title">Today Agenda</div>
-          <div className="agenda-list">
-            {!todayData?.events?.length && <div className="agenda-empty">No today data loaded</div>}
-            {(todayData?.events || []).slice(0, 12).map((e) => (
-              <div className="agenda-row" key={`panel_${e.id}`}>
-                <div className="agenda-time">{formatTimeRange(e.startAt, e.endAt)}</div>
-                <div className="agenda-dot" />
-                <div className="agenda-body">
-                  <div className="agenda-title">{e.title}</div>
-                  <div className="agenda-sub">{e.calendarName || e.provider}</div>
-                </div>
-              </div>
-            ))}
-          </div>
+          {calendarSideTab === 'today_overview' && (
+            <>
+              <div className="calendar-panel-title">Today Overview</div>
+              {todaySummary ? (
+                <>
+                  <div className="calendar-workspace-summary-text">{todaySummary.conciseSummary}</div>
+                  <div className="calendar-inline-metrics">
+                    <span className="calendar-badge neutral">Events {todaySummary.totalEvents}</span>
+                    <span className={`calendar-badge ${todaySummary.hardConflicts ? 'danger' : 'neutral'}`}>Hard {todaySummary.hardConflicts}</span>
+                    <span className={`calendar-badge ${todaySummary.softConflicts ? 'warn' : 'neutral'}`}>Soft {todaySummary.softConflicts}</span>
+                    <span className={`calendar-badge ${todaySummary.backToBackChains ? 'accent' : 'neutral'}`}>Back-to-back {todaySummary.backToBackChains}</span>
+                  </div>
+                </>
+              ) : (
+                <div className="agenda-empty">Run `/today` or click Refresh Today</div>
+              )}
+            </>
+          )}
 
-          <div className="calendar-panel-title" style={{ marginTop: 12 }}>Conflicts</div>
-          <div className="agenda-list">
-            {!weekData?.conflicts?.length && <div className="agenda-empty">No conflict data loaded</div>}
-            {(weekData?.conflicts || []).slice(0, 8).map((c, idx) => (
-              <div className="conflict-row" key={`panel_conflict_${idx}`}>
-                <span className={`calendar-badge ${c.type === 'hard' ? 'danger' : 'warn'}`}>{c.type}</span>
-                <div className="conflict-text">{c.explanation}</div>
+          {calendarSideTab === 'week_overview' && (
+            <>
+              <div className="calendar-panel-title">Week Overview</div>
+              {weekSummary ? (
+                <>
+                  <div className="calendar-workspace-summary-text">{weekSummary.conciseSummary}</div>
+                  <div className="calendar-inline-metrics" style={{ marginBottom: 10 }}>
+                    <span className="calendar-badge neutral">Events {weekSummary.totalEvents}</span>
+                    <span className={`calendar-badge ${weekSummary.hardConflicts ? 'danger' : 'neutral'}`}>Hard {weekSummary.hardConflicts}</span>
+                    <span className={`calendar-badge ${weekSummary.softConflicts ? 'warn' : 'neutral'}`}>Soft {weekSummary.softConflicts}</span>
+                  </div>
+                </>
+              ) : (
+                <div className="agenda-empty">Run `/week` or click Refresh Week</div>
+              )}
+              <div className="calendar-panel-title" style={{ marginTop: 12 }}>Conflicts</div>
+              <div className="agenda-list">
+                {!weekData?.conflicts?.length && <div className="agenda-empty">No conflict data loaded</div>}
+                {(weekData?.conflicts || []).slice(0, 8).map((c, idx) => (
+                  <div className="conflict-row" key={`panel_conflict_${idx}`}>
+                    <span className={`calendar-badge ${c.type === 'hard' ? 'danger' : 'warn'}`}>{c.type}</span>
+                    <div className="conflict-text">{c.explanation}</div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -757,12 +788,23 @@ export default function App() {
     <div className="workspace-root">
       <header className="topbar">
         <div className="brand-wrap">
-          <div className="brand">OCW</div>
-          <div className="workspace-pill">Workspace ▾</div>
+          <div className="brand">OC<span>W</span></div>
+          <div className="workspace-pill"><span>Workspace</span><span className="pill-caret">▾</span></div>
+          <button className="topbar-connect-btn" onClick={() => openConnectModal('google')}>Connect</button>
+        </div>
+        <div className="topbar-center">
+          <div className="nav-tabs">
+            <button className={`nav-tab ${workspaceView === 'assistant' ? 'active' : ''}`} onClick={() => setWorkspaceView('assistant')}>Assistant</button>
+            <button className={`nav-tab ${workspaceView === 'calendar' ? 'active' : ''}`} onClick={() => setWorkspaceView('calendar')}>Calendar</button>
+            <button className={`nav-tab ${workspaceView === 'drafts' ? 'active' : ''}`} onClick={() => setWorkspaceView('drafts')}>Drafts</button>
+            <button className={`nav-tab ${workspaceView === 'tools' ? 'active' : ''}`} onClick={() => setWorkspaceView('tools')}>Tools</button>
+            <button className={`nav-tab ${workspaceView === 'actions' ? 'active' : ''}`} onClick={() => setWorkspaceView('actions')}>Actions</button>
+            <button className={`nav-tab ${workspaceView === 'audit' ? 'active' : ''}`} onClick={() => setWorkspaceView('audit')}>Audit</button>
+          </div>
         </div>
         <div className="topbar-right">
-          <div className="status-pill">{status}</div>
-          <div className="profile-pill">Profile</div>
+          <div className="status-pill"><span className="status-dot" />{status}</div>
+          <button className="profile-pill">P</button>
         </div>
       </header>
 
@@ -783,12 +825,18 @@ export default function App() {
               <li>Product Strategy</li>
             </ul>
           </div>
-          <div className="sidebar-block compact-links">
-            <button className={workspaceView === 'assistant' ? 'nav-link active' : 'nav-link'} onClick={() => setWorkspaceView('assistant')}>Assistant</button>
-            <button className={workspaceView === 'calendar' ? 'nav-link active' : 'nav-link'} onClick={() => setWorkspaceView('calendar')}>Calendar</button>
-            <button className={workspaceView === 'drafts' ? 'nav-link active' : 'nav-link'} onClick={() => setWorkspaceView('drafts')}>Drafts</button>
-            <button className={workspaceView === 'projects' ? 'nav-link active' : 'nav-link'} onClick={() => setWorkspaceView('projects')}>Projects</button>
-            <button className={workspaceView === 'settings' ? 'nav-link active' : 'nav-link'} onClick={() => setWorkspaceView('settings')}>Settings</button>
+          <div className="sidebar-nav">
+            <button className={`sidebar-nav-item ${toolsDrawerOpen ? 'active' : ''}`} onClick={() => setToolsDrawerOpen((v) => !v)}>
+              <span>🔌</span> Connectivity
+            </button>
+            <div className="sidebar-divider" />
+            <button className={`sidebar-nav-item ${workspaceView === 'assistant' ? 'active' : ''}`} onClick={() => setWorkspaceView('assistant')}><span>💬</span> Assistant</button>
+            <button className={`sidebar-nav-item ${workspaceView === 'calendar' ? 'active' : ''}`} onClick={() => setWorkspaceView('calendar')}><span>📅</span> Calendar</button>
+            <button className={`sidebar-nav-item ${workspaceView === 'drafts' ? 'active' : ''}`} onClick={() => setWorkspaceView('drafts')}><span>📝</span> Drafts</button>
+            <button className={`sidebar-nav-item ${workspaceView === 'tools' ? 'active' : ''}`} onClick={() => setWorkspaceView('tools')}><span>🧰</span> Tools</button>
+            <button className={`sidebar-nav-item ${workspaceView === 'actions' ? 'active' : ''}`} onClick={() => setWorkspaceView('actions')}><span>🕒</span> Pending Actions</button>
+            <button className={`sidebar-nav-item ${workspaceView === 'audit' ? 'active' : ''}`} onClick={() => setWorkspaceView('audit')}><span>📜</span> Audit Log</button>
+            <button className={`sidebar-nav-item ${workspaceView === 'settings' ? 'active' : ''}`} onClick={() => setWorkspaceView('settings')}><span>⚙️</span> Settings</button>
           </div>
         </aside>
 
@@ -796,21 +844,70 @@ export default function App() {
           <section className="chat-canvas">
             <div className="canvas-head-row">
               <div className="section-head" style={{ marginBottom: 0 }}>
-                {workspaceView === 'calendar' ? 'Unified Calendar' : workspaceView === 'drafts' ? 'Drafts Workspace' : workspaceView === 'projects' ? 'Projects Workspace' : workspaceView === 'settings' ? 'Settings' : 'Conversation Thread'}
+                {workspaceView === 'calendar'
+                  ? 'Unified Calendar'
+                  : workspaceView === 'drafts'
+                    ? 'Drafts Workspace'
+                    : workspaceView === 'tools'
+                      ? 'Tools Workspace'
+                    : workspaceView === 'actions'
+                      ? 'Pending Actions'
+                      : workspaceView === 'audit'
+                        ? 'Audit Log'
+                        : workspaceView === 'projects'
+                        ? 'Projects Workspace'
+                        : workspaceView === 'settings'
+                          ? 'Settings'
+                          : 'Conversation Thread'}
               </div>
-              <div className="canvas-tabs">
-                <button className={workspaceView === 'assistant' ? 'active' : ''} onClick={() => setWorkspaceView('assistant')}>Assistant</button>
-                <button className={workspaceView === 'calendar' ? 'active' : ''} onClick={() => setWorkspaceView('calendar')}>Calendar</button>
-                <button className={workspaceView === 'drafts' ? 'active' : ''} onClick={() => setWorkspaceView('drafts')}>Drafts</button>
+              <div className="thread-actions">
+                <button className="icon-btn" title="Export">↑</button>
+                <button className="icon-btn" title="Clear" onClick={() => setMessages([])}>✕</button>
               </div>
             </div>
             <div className="message-list">
               {workspaceView === 'calendar' && renderCalendarWorkspace()}
               {workspaceView === 'drafts' && (
                 <div className="drafts-workspace">
+                  <div className="ops-card drafts-workbench-card">
+                    <div className="section-head">Email Draft Center (Gmail MVP)</div>
+                    <div className="muted small">Draft-first workflow. Sending requires explicit approval.</div>
+                    <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
+                      <input value={emailTo} onChange={(e) => setEmailTo(e.target.value)} placeholder="To (comma-separated)" />
+                      <input value={emailSubjectHint} onChange={(e) => setEmailSubjectHint(e.target.value)} placeholder="Subject hint" />
+                      <select value={emailTone} onChange={(e) => setEmailTone(e.target.value as 'professional' | 'friendly' | 'concise')}>
+                        <option value="professional">professional</option>
+                        <option value="friendly">friendly</option>
+                        <option value="concise">concise</option>
+                      </select>
+                      <textarea value={emailPrompt} onChange={(e) => setEmailPrompt(e.target.value)} rows={3} placeholder="Draft prompt" />
+                      <button onClick={() => void createEmailDraft()}>Generate Draft</button>
+                    </div>
+                    {emailStatus && <div className="muted small" style={{ marginTop: 6 }}>{emailStatus}</div>}
+                    <div style={{ display: 'grid', gap: 6, marginTop: 8, borderTop: '1px solid #2a2f3a', paddingTop: 8 }}>
+                      <div className="muted small">Gmail Thread Search / Read</div>
+                      <input value={emailThreadQuery} onChange={(e) => setEmailThreadQuery(e.target.value)} placeholder="Gmail search query (e.g., from:alice newer_than:7d)" />
+                      <button onClick={() => void runThreadSearch()}>Search Threads</button>
+                      <div className="action-list" style={{ maxHeight: 150 }}>
+                        {emailThreadResults.length === 0 && <div className="muted">No thread search results</div>}
+                        {emailThreadResults.map((t) => (
+                          <div className="action-row" key={t.id}>
+                            <div style={{ minWidth: 0 }}>
+                              <div className="action-id">{t.id}</div>
+                              <div className="muted small" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 380 }}>{t.snippet}</div>
+                            </div>
+                            <div className="action-buttons">
+                              <button onClick={() => void openThread(t.id)}>Open</button>
+                              <button onClick={() => void createReplyDraft(t.id)}>Reply Draft</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
                   <div className="drafts-grid">
-                    {emailDrafts.length === 0 && <div className="agenda-empty">No drafts yet. Use Email Draft Center or thread reply actions.</div>}
-                    {emailDrafts.map((d) => (
+                    {uniqueDraftsForDisplay.length === 0 && <div className="agenda-empty">No drafts yet. Use Email Draft Center or thread reply actions.</div>}
+                    {uniqueDraftsForDisplay.map((d) => (
                       <div className="email-card email-card-draft" key={`draftws_${d.id}`}>
                         <div className="email-card-head">
                           <div>
@@ -821,10 +918,72 @@ export default function App() {
                         </div>
                         <pre className="email-card-pre">{d.body}</pre>
                         <div className="email-card-actions">
+                          <button onClick={() => insertDraftIntoComposer({ subject: d.subject, body: d.body, to: d.to })}>Insert</button>
                           {d.status === 'prepared' && <button onClick={() => void approveAndSendDraft(d.id)}>Approve & Send</button>}
                         </div>
                       </div>
                     ))}
+                  </div>
+                </div>
+              )}
+              {workspaceView === 'tools' && (
+                <div className="drafts-workspace">
+                  <div className="ops-card drafts-workbench-card">
+                    <div className="section-head">Tool Output Cards</div>
+                    <InlineCard title="Scheduling Example">
+                      <div>Type: <code>/schedule 30 mins tomorrow afternoon</code></div>
+                      <div>Result renders as a structured card with approval action.</div>
+                    </InlineCard>
+                    <InlineCard title="Approval & Audit Backbone" tone="success">
+                      <div>Shared state machine across in-app and future Telegram flows.</div>
+                      <div><code>prepared → approved → executed | failed | cancelled</code></div>
+                    </InlineCard>
+                  </div>
+                </div>
+              )}
+              {workspaceView === 'actions' && (
+                <div className="drafts-workspace">
+                  <div className="ops-card drafts-workbench-card">
+                    <div className="section-head">Pending / Recent Actions</div>
+                    <div className="action-list">
+                      {actions.length === 0 && <div className="muted">No actions yet</div>}
+                      {actions.map((a) => (
+                        <div className="action-row" key={a.id}>
+                          <div>
+                            <div className="action-id">{a.id}</div>
+                            <div className="muted small">{a.actionType} · {a.status}</div>
+                          </div>
+                          <div className="action-buttons">
+                            {a.status === 'prepared' && (
+                              <>
+                                <button onClick={() => transitionAction(a.id, 'approved').then(refreshOps)}>Approve</button>
+                                <button onClick={() => transitionAction(a.id, 'cancelled').then(refreshOps)}>Cancel</button>
+                              </>
+                            )}
+                            {a.status === 'approved' && (
+                              <button onClick={() => transitionAction(a.id, 'executed').then(refreshOps)}>Execute</button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {workspaceView === 'audit' && (
+                <div className="drafts-workspace">
+                  <div className="ops-card drafts-workbench-card">
+                    <div className="section-head">Audit Log</div>
+                    <div className="audit-list">
+                      {audit.slice(0, 50).map((entry) => (
+                        <div key={entry.id} className="audit-row">
+                          <div className="small mono">{entry.timestamp}</div>
+                          <div>{entry.actionType}</div>
+                          <div className="muted small">{entry.status}</div>
+                        </div>
+                      ))}
+                      {audit.length === 0 && <div className="muted">No audit entries</div>}
+                    </div>
                   </div>
                 </div>
               )}
@@ -939,6 +1098,9 @@ export default function App() {
                           <div className="email-meta-row"><strong>Subject</strong><span>{card.subject}</span></div>
                           {card.threadId && <div className="email-meta-row"><strong>Thread</strong><span className="mono small">{card.threadId}</span></div>}
                           <pre className="email-card-pre">{card.bodyPreview}</pre>
+                          <div className="email-card-actions">
+                            <button onClick={() => insertDraftIntoComposer({ subject: card.subject, body: card.bodyPreview, to: card.recipients })}>Insert</button>
+                          </div>
                         </div>
                       ) : (
                         <div className="email-card-body">
@@ -966,222 +1128,176 @@ export default function App() {
           </section>
 
           <section className="composer-panel">
-            <div className="enabled-tools-row">
-              {tools.length > 0 ? tools.map((tool) => <span key={tool} className="tool-chip">{tool} ✓</span>) : <span className="muted">No tools enabled</span>}
-            </div>
-            {suggestions.length > 0 && (
-              <div className="slash-suggest">
-                {suggestions.map((s) => (
-                  <button key={s} className="ghost-chip" onClick={() => setComposer(`${s} `)}>{s}</button>
-                ))}
+            <div className="composer-box embedded">
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                hidden
+                onChange={onFileInputChange}
+              />
+              {suggestions.length > 0 && (
+                <div className="slash-suggest composer-inline-suggest">
+                  {suggestions.map((s) => (
+                    <button key={s} className="ghost-chip" onClick={() => setComposer(`${s} `)}>{s}</button>
+                  ))}
+                </div>
+              )}
+              {attachedFiles.length > 0 && (
+                <div className="composer-attachments">
+                  {attachedFiles.map((file) => (
+                    <button key={file.id} className="attachment-chip" onClick={() => removeAttachedFile(file.id)} title="Remove attachment">
+                      <span className="attachment-name">{file.name}</span>
+                      <span className="attachment-x">✕</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <textarea
+                className="composer-input"
+                placeholder="+ Write a message… (try /schedule, /summarize, /projects)"
+                value={composer}
+                onChange={(e) => setComposer(e.target.value)}
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                    e.preventDefault();
+                    void onSend();
+                  }
+                }}
+              />
+              <div className="composer-toolbar composer-toolbar-embedded">
+                <div className="composer-toolbar-left-cluster">
+                  <select value={model} onChange={(e) => setModel(e.target.value)}>
+                    <option value="llama3:8b">llama3:8b (Fast)</option>
+                    <option value="llama3:70b">llama3:70b (Deep)</option>
+                    <option value="mixtral">mixtral (Reasoning)</option>
+                  </select>
+                  <button className="ghost-btn" onClick={onAttachClick}>📎 Attach</button>
+                  <div className="tool-toggle-group">
+                    {TOOL_OPTIONS.map((tool) => (
+                      <label key={tool}>
+                        <input
+                          type="checkbox"
+                          checked={tools.includes(tool)}
+                          onChange={(e) => {
+                            setTools((prev) => (e.target.checked ? [...prev, tool] : prev.filter((t) => t !== tool)));
+                          }}
+                        />
+                        {tool}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div className="composer-toolbar-right-cluster">
+                  <div className="segmented">
+                    <button className={mode === 'quick' ? 'active' : ''} onClick={() => setMode('quick')}>Quick</button>
+                    <button className={mode === 'deep' ? 'active' : ''} onClick={() => setMode('deep')}>Deep</button>
+                  </div>
+                  <span className="approval-indicator">Approval required for external actions</span>
+                  <button className="send-btn" onClick={() => void onSend()}>Send</button>
+                </div>
               </div>
-            )}
-            <textarea
-              className="composer-input"
-              placeholder="+ Write a message… (try /schedule, /summarize, /projects)"
-              value={composer}
-              onChange={(e) => setComposer(e.target.value)}
-              onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-                  e.preventDefault();
-                  void onSend();
-                }
-              }}
-            />
-            <div className="composer-toolbar">
-              <select value={model} onChange={(e) => setModel(e.target.value)}>
-                <option value="llama3:8b">llama3:8b (Fast)</option>
-                <option value="llama3:70b">llama3:70b (Deep)</option>
-                <option value="mixtral">mixtral (Reasoning)</option>
-              </select>
-              <button className="ghost-btn">📎 Attach</button>
-              <div className="tool-toggle-group">
-                {TOOL_OPTIONS.map((tool) => (
-                  <label key={tool}>
-                    <input
-                      type="checkbox"
-                      checked={tools.includes(tool)}
-                      onChange={(e) => {
-                        setTools((prev) => (e.target.checked ? [...prev, tool] : prev.filter((t) => t !== tool)));
-                      }}
-                    />
-                    {tool}
-                  </label>
-                ))}
+              <div className="composer-meta-inline mono">
+                <span>{tools.length > 0 ? `Tools: ${tools.join(', ')}` : 'No tools enabled'}</span>
+                <span>Context: {tokenEstimate.toLocaleString()} / {contextWindow.toLocaleString()} · Cost: ${costEstimate.toFixed(4)}</span>
               </div>
-              <div className="segmented">
-                <button className={mode === 'quick' ? 'active' : ''} onClick={() => setMode('quick')}>Quick</button>
-                <button className={mode === 'deep' ? 'active' : ''} onClick={() => setMode('deep')}>Deep</button>
-              </div>
-              <span className="approval-indicator">Approval required for external actions</span>
-              <button className="send-btn" onClick={() => void onSend()}>Send</button>
-            </div>
-            <div className="advanced-bar mono">
-              <div>Context Used: {tokenEstimate.toLocaleString()} / {contextWindow.toLocaleString()} tokens</div>
-              <div>Estimated Cost: ${costEstimate.toFixed(4)}</div>
             </div>
           </section>
         </main>
 
-        <aside className="ops-panel">
+        <aside className={`ops-panel tools-drawer ${toolsDrawerOpen ? 'open' : ''}`}>
+          <div className="drawer-header">
+            <div className="drawer-title">Connectivity</div>
+            <button className="drawer-close" onClick={() => setToolsDrawerOpen(false)}>✕</button>
+          </div>
+          <div className="drawer-scroll">
           <div className="ops-card">
             <div className="section-head">Connections</div>
-            <div className="muted small">
-              Click a provider to connect. Google powers both Gmail and Google Calendar in the unified view.
-            </div>
-            <div className="small mono" style={{ marginTop: 6, wordBreak: 'break-all' }}>Google Redirect: {googleRedirectUri || 'n/a'}</div>
-            <div className="provider-connect-stack" style={{ marginTop: 8 }}>
-              <button className={`provider-connect-btn ${accounts.some((a) => a.provider === 'google') ? 'connected' : ''}`} onClick={() => void startGoogleConnect()} disabled={!googleConfigured}>
+            <div className="connection-icon-row" style={{ marginTop: 8 }}>
+              <button
+                className={`connection-icon-btn ${accounts.some((a) => a.provider === 'google') ? 'connected' : ''}`}
+                onClick={() => openConnectModal('google')}
+                title="Connect Gmail / Google Calendar"
+              >
                 <span className="provider-avatar google">G</span>
-                <span className="provider-connect-body">
-                  <span className="provider-connect-title">Google Account</span>
-                  <span className="provider-connect-sub">{googleConfigured ? 'Connect Gmail + Calendar' : 'Set Google OAuth env first'}</span>
-                </span>
+                {accounts.some((a) => a.provider === 'google') && <span className="connection-icon-badge">✓</span>}
               </button>
-              <button className="provider-connect-btn muted" disabled>
+              <button
+                className="connection-icon-btn"
+                disabled
+                title="Outlook (coming soon)"
+              >
                 <span className="provider-avatar outlook">O</span>
-                <span className="provider-connect-body">
-                  <span className="provider-connect-title">Microsoft Account</span>
-                  <span className="provider-connect-sub">Outlook Mail + Calendar (coming soon)</span>
-                </span>
               </button>
             </div>
-            <div className="action-buttons" style={{ marginTop: 8 }}>
-              <button onClick={() => void runGoogleCalendarSync()} disabled={!accounts.some((a) => a.provider === 'google')}>Sync Unified Calendar</button>
-            </div>
-            {calendarSyncStatus && <div className="muted small" style={{ marginTop: 6 }}>{calendarSyncStatus}</div>}
-            {oauthUrl && (
-              <div className="small" style={{ marginTop: 8 }}>
-                <a href={oauthUrl} target="_blank" rel="noreferrer">Open Google Consent URL</a>
-              </div>
-            )}
-            <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
-              <input placeholder="OAuth state" value={oauthState} onChange={(e) => setOauthState(e.target.value)} />
-              <textarea placeholder="Paste authorization code" value={oauthCode} onChange={(e) => setOauthCode(e.target.value)} rows={3} />
-              <button onClick={() => void completeGoogleConnect()} disabled={!oauthState || !oauthCode}>Complete Connect</button>
-            </div>
-            <div className="action-list" style={{ marginTop: 8, maxHeight: 130 }}>
-              {accounts.length === 0 && <div className="muted">No connected accounts</div>}
-              {accounts.map((acct) => (
-                <div className="action-row" key={acct.id}>
-                  <div>
-                    <div className="action-id">{acct.provider}</div>
-                    <div className="muted small">{acct.accountEmail || acct.id}</div>
-                  </div>
-                  <div className="action-buttons">
-                    {acct.provider === 'google' && <button onClick={() => void runGoogleCalendarSync(acct.id)}>Sync</button>}
-                    <button onClick={() => disconnectAccount(acct.id).then(refreshOps)}>Disconnect</button>
-                  </div>
-                </div>
-              ))}
-            </div>
           </div>
 
-          <div className="ops-card">
-            <div className="section-head">Email Draft Center (Gmail MVP)</div>
-            <div className="muted small">Draft-first workflow. Sending requires explicit approval.</div>
-            <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
-              <input value={emailTo} onChange={(e) => setEmailTo(e.target.value)} placeholder="To (comma-separated)" />
-              <input value={emailSubjectHint} onChange={(e) => setEmailSubjectHint(e.target.value)} placeholder="Subject hint" />
-              <select value={emailTone} onChange={(e) => setEmailTone(e.target.value as 'professional' | 'friendly' | 'concise')}>
-                <option value="professional">professional</option>
-                <option value="friendly">friendly</option>
-                <option value="concise">concise</option>
-              </select>
-              <textarea value={emailPrompt} onChange={(e) => setEmailPrompt(e.target.value)} rows={3} placeholder="Draft prompt" />
-              <button onClick={() => void createEmailDraft()}>Generate Draft</button>
-            </div>
-            {emailStatus && <div className="muted small" style={{ marginTop: 6 }}>{emailStatus}</div>}
-            <div style={{ display: 'grid', gap: 6, marginTop: 8, borderTop: '1px solid #eef2f7', paddingTop: 8 }}>
-              <div className="muted small">Gmail Thread Search / Read</div>
-              <input value={emailThreadQuery} onChange={(e) => setEmailThreadQuery(e.target.value)} placeholder="Gmail search query (e.g., from:alice newer_than:7d)" />
-              <button onClick={() => void runThreadSearch()}>Search Threads</button>
-              <div className="action-list" style={{ maxHeight: 150 }}>
-                {emailThreadResults.length === 0 && <div className="muted">No thread search results</div>}
-                {emailThreadResults.map((t) => (
-                  <div className="action-row" key={t.id}>
-                    <div style={{ minWidth: 0 }}>
-                      <div className="action-id">{t.id}</div>
-                      <div className="muted small" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 220 }}>{t.snippet}</div>
-                    </div>
-                    <div className="action-buttons">
-                      <button onClick={() => void openThread(t.id)}>Open</button>
-                      <button onClick={() => void createReplyDraft(t.id)}>Reply Draft</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="action-list" style={{ marginTop: 8, maxHeight: 220 }}>
-              {emailDrafts.length === 0 && <div className="muted">No email drafts</div>}
-              {emailDrafts.map((d) => (
-                <div className="action-row" key={d.id}>
-                  <div style={{ minWidth: 0 }}>
-                    <div className="action-id">{d.id}</div>
-                    <div className="muted small">{d.status} · {d.to.join(', ') || '(no recipient)'}</div>
-                    <div className="small" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 220 }}>{d.subject}</div>
-                  </div>
-                  <div className="action-buttons">
-                    {d.status === 'prepared' && <button onClick={() => void approveAndSendDraft(d.id)}>Approve & Send</button>}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="ops-card">
-            <div className="section-head">Tool Output Cards</div>
-            <InlineCard title="Scheduling Example">
-              <div>Type: <code>/schedule 30 mins tomorrow afternoon</code></div>
-              <div>Result renders as a structured card with approval action.</div>
-            </InlineCard>
-            <InlineCard title="Approval & Audit Backbone" tone="success">
-              <div>Shared state machine across in-app and future Telegram flows.</div>
-              <div><code>prepared → approved → executed | failed | cancelled</code></div>
-            </InlineCard>
-          </div>
-
-          <div className="ops-card">
-            <div className="section-head">Pending / Recent Actions</div>
-            <div className="action-list">
-              {actions.length === 0 && <div className="muted">No actions yet</div>}
-              {actions.map((a) => (
-                <div className="action-row" key={a.id}>
-                  <div>
-                    <div className="action-id">{a.id}</div>
-                    <div className="muted small">{a.actionType} · {a.status}</div>
-                  </div>
-                  <div className="action-buttons">
-                    {a.status === 'prepared' && (
-                      <>
-                        <button onClick={() => transitionAction(a.id, 'approved').then(refreshOps)}>Approve</button>
-                        <button onClick={() => transitionAction(a.id, 'cancelled').then(refreshOps)}>Cancel</button>
-                      </>
-                    )}
-                    {a.status === 'approved' && (
-                      <button onClick={() => transitionAction(a.id, 'executed').then(refreshOps)}>Execute</button>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="ops-card">
-            <div className="section-head">Audit Log</div>
-            <div className="audit-list">
-              {audit.slice(0, 12).map((entry) => (
-                <div key={entry.id} className="audit-row">
-                  <div className="small mono">{entry.timestamp}</div>
-                  <div>{entry.actionType}</div>
-                  <div className="muted small">{entry.status}</div>
-                </div>
-              ))}
-              {audit.length === 0 && <div className="muted">No audit entries</div>}
-            </div>
           </div>
         </aside>
       </div>
+
+      <div className={`drawer-overlay ${toolsDrawerOpen ? 'show' : ''}`} onClick={() => setToolsDrawerOpen(false)} />
+
+      {showConnectModal && (
+        <div className="modal-backdrop" onClick={() => setShowConnectModal(false)}>
+          <div className="connect-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="connect-modal-head">
+              <div>
+                <div className="connect-modal-title">Connect Account</div>
+                <div className="connect-modal-sub">Add email/calendar providers to the unified workspace.</div>
+              </div>
+              <button className="mini-icon-btn" onClick={() => setShowConnectModal(false)}>✕</button>
+            </div>
+
+            <div className="connect-provider-grid">
+              <button
+                className={`provider-connect-btn ${connectProvider === 'google' ? 'selected' : ''} ${accounts.some((a) => a.provider === 'google') ? 'connected' : ''}`}
+                onClick={() => setConnectProvider('google')}
+              >
+                <span className="provider-avatar google">G</span>
+                <span className="provider-connect-body">
+                  <span className="provider-connect-title">Google (Gmail + Calendar)</span>
+                  <span className="provider-connect-sub">{googleConfigured ? 'Connect once, use both apps' : 'Requires Google OAuth config'}</span>
+                </span>
+              </button>
+              <button className={`provider-connect-btn muted ${connectProvider === 'outlook' ? 'selected' : ''}`} onClick={() => setConnectProvider('outlook')} disabled>
+                <span className="provider-avatar outlook">O</span>
+                <span className="provider-connect-body">
+                  <span className="provider-connect-title">Microsoft Outlook</span>
+                  <span className="provider-connect-sub">Coming soon</span>
+                </span>
+              </button>
+            </div>
+
+            {connectProvider === 'google' && (
+              <div className="connect-modal-panel">
+                <div className="connect-flow-row">
+                  <div>
+                    <div className="connect-flow-title">Google OAuth</div>
+                    <div className="connect-flow-sub">Starts browser consent and returns a code to paste here.</div>
+                  </div>
+                  <button onClick={() => void startGoogleConnect()} disabled={!googleConfigured}>Start Google Connect</button>
+                </div>
+                <div className="small mono connect-redirect-line">Redirect: {googleRedirectUri || 'n/a'}</div>
+                {!googleConfigured && <div className="connect-inline-warning">Set Google OAuth env vars in `desktop/.env` to enable connect.</div>}
+                {oauthUrl && (
+                  <div className="connect-consent-link">
+                    <a href={oauthUrl} target="_blank" rel="noreferrer">Open Google Consent URL</a>
+                  </div>
+                )}
+                <div className="connect-form-grid">
+                  <input placeholder="OAuth state" value={oauthState} onChange={(e) => setOauthState(e.target.value)} />
+                  <textarea placeholder="Paste authorization code" value={oauthCode} onChange={(e) => setOauthCode(e.target.value)} rows={4} />
+                  <div className="connect-modal-actions">
+                    <button onClick={() => void completeGoogleConnect()} disabled={!oauthState || !oauthCode}>Complete Connect</button>
+                    <button onClick={() => { setOauthUrl(''); setOauthState(''); setOauthCode(''); }}>Clear</button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -100,3 +100,68 @@ export const draftEmails = sqliteTable('draft_emails', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
+
+export const orchestrationRuns = sqliteTable('orchestration_runs', {
+  id: text('id').primaryKey(),
+  conversationId: text('conversation_id'),
+  channel: text('channel').notNull(),
+  mode: text('mode').notNull(),
+  model: text('model').notNull(),
+  status: text('status').notNull(),
+  errorDetails: text('error_details'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const contextPacks = sqliteTable('context_packs', {
+  id: text('id').primaryKey(),
+  runId: text('run_id').notNull(),
+  intentGuess: text('intent_guess').notNull(),
+  payloadJson: text('payload_json').notNull(),
+  createdAt: text('created_at').notNull(),
+});
+
+export const executionPlans = sqliteTable('execution_plans', {
+  id: text('id').primaryKey(),
+  runId: text('run_id').notNull(),
+  intent: text('intent').notNull(),
+  riskLevel: text('risk_level').notNull(),
+  payloadJson: text('payload_json').notNull(),
+  createdAt: text('created_at').notNull(),
+});
+
+export const judgeDecisions = sqliteTable('judge_decisions', {
+  id: text('id').primaryKey(),
+  runId: text('run_id').notNull(),
+  stage: text('stage').notNull(),
+  status: text('status').notNull(),
+  requiresApproval: text('requires_approval').notNull(),
+  requiredFieldsJson: text('required_fields_json').notNull(),
+  policyNotesJson: text('policy_notes_json').notNull(),
+  payloadJson: text('payload_json').notNull(),
+  createdAt: text('created_at').notNull(),
+});
+
+export const agentTraces = sqliteTable('agent_traces', {
+  id: text('id').primaryKey(),
+  runId: text('run_id').notNull(),
+  agent: text('agent').notNull(),
+  status: text('status').notNull(),
+  detailsJson: text('details_json'),
+  errorDetails: text('error_details'),
+  createdAt: text('created_at').notNull(),
+});
+
+export const toolExecutionLogs = sqliteTable('tool_execution_logs', {
+  id: text('id').primaryKey(),
+  runId: text('run_id').notNull(),
+  toolCallId: text('tool_call_id').notNull(),
+  tool: text('tool').notNull(),
+  status: text('status').notNull(),
+  argsJson: text('args_json'),
+  resultJson: text('result_json'),
+  errorDetails: text('error_details'),
+  startedAt: text('started_at'),
+  finishedAt: text('finished_at'),
+  createdAt: text('created_at').notNull(),
+});

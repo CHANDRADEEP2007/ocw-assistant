@@ -2,7 +2,8 @@ import type { Express } from 'express';
 import { z } from 'zod';
 
 import { listAuditLogs } from '../services/auditLog.js';
-import { listActions, prepareAction, transitionAction } from '../services/approvalEngine.js';
+import { executeApprovedAction } from '../services/actionExecutor.js';
+import { listActions, prepareAction, reaffirmAction, transitionAction } from '../services/approvalEngine.js';
 
 const prepareSchema = z.object({
   actionType: z.string().min(1),
@@ -16,6 +17,10 @@ const transitionSchema = z.object({
   nextStatus: z.enum(['approved', 'executed', 'failed', 'cancelled']),
   approvedBy: z.string().optional(),
   errorDetails: z.string().optional(),
+});
+
+const reaffirmSchema = z.object({
+  approvedBy: z.string().optional(),
 });
 
 export function registerActionRoutes(app: Express) {
@@ -38,12 +43,31 @@ export function registerActionRoutes(app: Express) {
       return res.status(400).json({ error: 'invalid_request', details: parsed.error.flatten() });
     }
     try {
+      if (parsed.data.nextStatus === 'executed') {
+        const result = await executeApprovedAction({ actionId: req.params.actionId, approvedBy: parsed.data.approvedBy });
+        return res.json(result);
+      }
       const action = await transitionAction({ actionId: req.params.actionId, ...parsed.data });
-      res.json({ item: action });
+      return res.json({ item: action });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const code = message === 'action_not_found' ? 404 : 400;
       res.status(code).json({ error: message });
+    }
+  });
+
+  app.post('/api/actions/:actionId/reaffirm', async (req, res) => {
+    const parsed = reaffirmSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'invalid_request', details: parsed.error.flatten() });
+    }
+    try {
+      const item = await reaffirmAction({ actionId: req.params.actionId, approvedBy: parsed.data.approvedBy });
+      return res.json({ item });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = message === 'action_not_found' ? 404 : 400;
+      return res.status(code).json({ error: message });
     }
   });
 

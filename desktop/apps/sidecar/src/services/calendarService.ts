@@ -266,3 +266,78 @@ export async function getCalendarSummary(mode: 'today' | 'week', anchorDateIso?:
     conciseSummary,
   };
 }
+
+function combineDateTimeUtc(date: string, time: string) {
+  const iso = `${date}T${time.length === 5 ? `${time}:00` : time}Z`;
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error('invalid_datetime');
+  }
+  return parsed.toISOString();
+}
+
+export async function createLocalCalendarEventFromApprovedAction(input: {
+  actionId: string;
+  payload: Record<string, unknown>;
+}) {
+  const ts = now();
+  let calendar = (await db.select().from(calendars).where(eq(calendars.included, '1')).limit(1))[0];
+  if (!calendar) {
+    const created = {
+      id: id('cal'),
+      provider: 'local',
+      accountId: null,
+      name: 'Local Action Calendar',
+      timezone: 'UTC',
+      color: '#2563eb',
+      included: '1',
+      createdAt: ts,
+      updatedAt: ts,
+    } as const;
+    await db.insert(calendars).values(created);
+    calendar = created as unknown as typeof calendars.$inferSelect;
+  }
+
+  const title = typeof input.payload.eventTitle === 'string' && input.payload.eventTitle.trim() ? input.payload.eventTitle.trim() : 'Untitled Event';
+  const startDate = typeof input.payload.startDate === 'string' ? input.payload.startDate.trim() : '';
+  const startTime = typeof input.payload.startTime === 'string' ? input.payload.startTime.trim() : '';
+  const endTime = typeof input.payload.endTime === 'string' ? input.payload.endTime.trim() : '';
+  if (!startDate || !startTime || !endTime) {
+    throw new Error('calendar_event_fields_missing');
+  }
+
+  const startAt = combineDateTimeUtc(startDate, startTime);
+  const endAt = combineDateTimeUtc(startDate, endTime);
+  if (endAt <= startAt) {
+    throw new Error('calendar_event_end_before_start');
+  }
+
+  const event = {
+    id: id('evt'),
+    calendarId: calendar.id,
+    provider: calendar.provider,
+    sourceEventId: null,
+    title,
+    description: typeof input.payload.description === 'string' ? input.payload.description : null,
+    location: typeof input.payload.location === 'string' ? input.payload.location : null,
+    status: 'confirmed',
+    startAt,
+    endAt,
+    timezone: 'UTC',
+    attendeesJson: JSON.stringify(
+      Array.isArray(input.payload.attendees) ? input.payload.attendees.filter((x): x is string => typeof x === 'string') : [],
+    ),
+    createdAt: ts,
+    updatedAt: ts,
+  } as const;
+  await db.insert(calendarEvents).values(event);
+  await writeAuditLog({
+    actionType: 'calendar_event_created_from_action',
+    targetType: 'calendar_event',
+    targetRef: event.id,
+    status: 'executed',
+    details: { actionId: input.actionId, calendarId: calendar.id },
+  });
+
+  return { event };
+}

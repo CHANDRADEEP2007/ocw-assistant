@@ -119,3 +119,40 @@ export async function transitionAction(input: {
 
   return next;
 }
+
+export async function reaffirmAction(input: {
+  actionId: string;
+  approvedBy?: string;
+}): Promise<ApprovalAction> {
+  const current = await getAction(input.actionId);
+  if (!current) {
+    throw new Error('action_not_found');
+  }
+  if (current.status !== 'approved') {
+    throw new Error('action_not_approved');
+  }
+
+  const updatedAt = now();
+  await db
+    .update(approvalActions)
+    .set({
+      approvedBy: input.approvedBy ?? current.approvedBy ?? null,
+      updatedAt,
+    })
+    .where(eq(approvalActions.id, input.actionId));
+
+  const next = await getAction(input.actionId);
+  if (!next) {
+    throw new Error('action_not_found');
+  }
+
+  await writeAuditLog({
+    actionType: 'approval_reaffirmed',
+    targetType: next.targetType,
+    targetRef: next.id,
+    status: next.status,
+    details: { actionType: next.actionType },
+  });
+
+  return next;
+}

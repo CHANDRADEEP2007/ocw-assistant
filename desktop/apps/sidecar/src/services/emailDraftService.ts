@@ -345,3 +345,50 @@ export async function approveAndSendDraftEmail(input: { draftId: string; approve
     throw error;
   }
 }
+
+export async function materializeApprovedSendActionAsLocalDraft(input: {
+  actionId: string;
+  payload: Record<string, unknown>;
+}) {
+  const ts = now();
+  let accountId: string | null = null;
+  const googleAccounts = await getConnectedAccountsByProvider('google');
+  accountId = googleAccounts[0]?.id ?? null;
+
+  const to = Array.isArray(input.payload.to) ? input.payload.to.filter((x): x is string => typeof x === 'string') : [];
+  const cc = Array.isArray(input.payload.cc) ? input.payload.cc.filter((x): x is string => typeof x === 'string') : [];
+  const bcc = Array.isArray(input.payload.bcc) ? input.payload.bcc.filter((x): x is string => typeof x === 'string') : [];
+  const subject = typeof input.payload.subject === 'string' && input.payload.subject.trim() ? input.payload.subject.trim() : 'Approved Email';
+  const body = typeof input.payload.body === 'string' && input.payload.body.trim() ? input.payload.body.trim() : '(No body provided)';
+
+  const draftId = id('draft');
+  const row: DraftRow = {
+    id: draftId,
+    accountId,
+    threadId: null,
+    inReplyTo: null,
+    referencesHeader: null,
+    toJson: JSON.stringify(to),
+    ccJson: JSON.stringify(cc),
+    bccJson: JSON.stringify(bcc),
+    subject,
+    body,
+    sourcePrompt: 'MAOE approved email.send action (safe local draft materialization)',
+    tone: null,
+    status: 'approved',
+    approvalActionId: input.actionId,
+    gmailMessageId: null,
+    errorDetails: null,
+    createdAt: ts,
+    updatedAt: ts,
+  };
+  await db.insert(draftEmails).values(row);
+  await writeAuditLog({
+    actionType: 'email_send_action_materialized_draft',
+    targetType: 'draft_email',
+    targetRef: draftId,
+    status: 'executed',
+    details: { actionId: input.actionId, toCount: to.length },
+  });
+  return { draft: toDto(row), mode: 'safe_local_draft' as const };
+}

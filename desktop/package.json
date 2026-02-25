@@ -10,6 +10,8 @@
     "dev:ui": "npm --workspace @ocw/ui run dev",
     "dev:sidecar": "npm --workspace @ocw/sidecar run dev",
     "build:ui": "npm --workspace @ocw/ui run build",
-    "build:sidecar": "npm --workspace @ocw/sidecar run build"
+    "build:sidecar": "npm --workspace @ocw/sidecar run build",
+    "test:sidecar": "npm --workspace @ocw/sidecar run test",
+    "test": "npm run test:sidecar"
   }
 }

@@ -14,11 +14,14 @@ import {
   googleOAuthStart,
   googleOAuthStatus,
   health,
+  listOrchestrationRuns,
+  getOrchestrationRun,
   listEmailDrafts,
   listActions,
   listAccounts,
   listAuditLogs,
   prepareAction,
+  reaffirmAction as reaffirmApprovalAction,
   searchGmailThreads,
   syncGoogleCalendar,
   toChatMessage,
@@ -26,7 +29,7 @@ import {
   approveSendEmailDraft,
 } from './lib/api';
 import type { ApprovalAction, AuditEntry, ChatMessage } from './types';
-import type { CalendarConflict, CalendarEvent, CalendarSummary } from './lib/api';
+import type { CalendarConflict, CalendarEvent, CalendarSummary, OrchestrationRunDetails, OrchestrationRunListItem } from './lib/api';
 
 const TOOL_OPTIONS = ['Calendar', 'Email', 'Projects'] as const;
 
@@ -108,7 +111,7 @@ export default function App() {
       };
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [workspaceView, setWorkspaceView] = useState<'assistant' | 'calendar' | 'drafts' | 'tools' | 'actions' | 'audit' | 'projects' | 'settings'>('assistant');
+  const [workspaceView, setWorkspaceView] = useState<'assistant' | 'calendar' | 'drafts' | 'tools' | 'actions' | 'audit' | 'orchestration' | 'projects' | 'settings'>('assistant');
   const [composer, setComposer] = useState('');
   const [model, setModel] = useState('llama3:8b');
   const [mode, setMode] = useState<'quick' | 'deep'>('quick');
@@ -116,6 +119,10 @@ export default function App() {
   const [status, setStatus] = useState('Checking sidecar...');
   const [actions, setActions] = useState<ApprovalAction[]>([]);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [orchestrationRuns, setOrchestrationRuns] = useState<OrchestrationRunListItem[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string>('');
+  const [selectedRunDetails, setSelectedRunDetails] = useState<OrchestrationRunDetails | null>(null);
+  const [orchestrationStatus, setOrchestrationStatus] = useState('');
   const [accounts, setAccounts] = useState<Array<{ id: string; provider: string; accountEmail: string | null; status: string }>>([]);
   const [googleConfigured, setGoogleConfigured] = useState<boolean | null>(null);
   const [googleRedirectUri, setGoogleRedirectUri] = useState('');
@@ -137,6 +144,8 @@ export default function App() {
   const [emailThreadResults, setEmailThreadResults] = useState<Array<{ id: string; snippet: string }>>([]);
   const [calendarPreviewCards, setCalendarPreviewCards] = useState<CalendarPreviewCard[]>([]);
   const [emailPreviewCards, setEmailPreviewCards] = useState<EmailPreviewCard[]>([]);
+  const [maoeCards, setMaoeCards] = useState<Array<{ id: string; type: string; title: string; data?: Record<string, unknown>; summary?: string }>>([]);
+  const [maoeQuickActions, setMaoeQuickActions] = useState<Array<{ id: string; label: string; action: string }>>([]);
   const [todayData, setTodayData] = useState<{ events: CalendarEvent[]; conflicts: CalendarConflict[] } | null>(null);
   const [weekData, setWeekData] = useState<{ events: CalendarEvent[]; conflicts: CalendarConflict[] } | null>(null);
   const [todaySummary, setTodaySummary] = useState<CalendarSummary | null>(null);
@@ -162,6 +171,25 @@ export default function App() {
     }
   }
 
+  async function refreshOrchestration(selectedId?: string) {
+    try {
+      const runs = await listOrchestrationRuns(40);
+      setOrchestrationRuns(runs.items);
+      const runId = selectedId || selectedRunId || runs.items[0]?.id;
+      if (!runId) {
+        setSelectedRunId('');
+        setSelectedRunDetails(null);
+        return;
+      }
+      const details = await getOrchestrationRun(runId);
+      setSelectedRunId(runId);
+      setSelectedRunDetails(details.item);
+      setOrchestrationStatus(`Loaded ${runs.items.length} MAOE run(s)`);
+    } catch (err) {
+      setOrchestrationStatus(`MAOE load error: ${String(err)}`);
+    }
+  }
+
   useEffect(() => {
     health()
       .then((h) => setStatus(`Sidecar online · ${h.service} · :${h.port}`))
@@ -175,6 +203,7 @@ export default function App() {
         setGoogleConfigured(false);
       });
     void refreshOps();
+    void refreshOrchestration();
   }, []);
 
   async function startGoogleConnect() {
@@ -222,6 +251,150 @@ export default function App() {
 
   function removeAttachedFile(id: string) {
     setAttachedFiles((prev) => prev.filter((f) => f.id !== id));
+  }
+
+  function extractApprovalActionIdFromCard(card: { data?: Record<string, unknown> }) {
+    const data = card.data;
+    if (!data) return null;
+    const directId = typeof data.id === 'string' ? data.id : null;
+    if (directId) return directId;
+    const nested = data.item;
+    if (nested && typeof nested === 'object' && nested !== null && 'id' in nested) {
+      const idVal = (nested as { id?: unknown }).id;
+      return typeof idVal === 'string' ? idVal : null;
+    }
+    return null;
+  }
+
+  function extractApprovalActionStatusFromCard(card: { data?: Record<string, unknown> }) {
+    const data = card.data;
+    if (!data) return null;
+    const directStatus = typeof data.status === 'string' ? data.status : null;
+    if (directStatus && ['prepared', 'approved', 'executed', 'failed', 'cancelled'].includes(directStatus)) return directStatus;
+    const nested = data.item;
+    if (nested && typeof nested === 'object' && nested !== null && 'status' in nested) {
+      const statusVal = (nested as { status?: unknown }).status;
+      if (typeof statusVal === 'string' && ['prepared', 'approved', 'executed', 'failed', 'cancelled'].includes(statusVal)) return statusVal;
+    }
+    return null;
+  }
+
+  function patchMaoeCardApprovalStatus(actionId: string, nextStatus: 'approved' | 'executed' | 'cancelled' | 'failed') {
+    setMaoeCards((prev) =>
+      prev.map((card) => {
+        if (extractApprovalActionIdFromCard(card) !== actionId) return card;
+        const data = card.data ? { ...card.data } : {};
+        if (typeof data.id === 'string') {
+          data.status = nextStatus;
+        } else if (data.item && typeof data.item === 'object') {
+          data.item = { ...(data.item as Record<string, unknown>), status: nextStatus };
+        } else {
+          data.status = nextStatus;
+        }
+        return { ...card, data };
+      }),
+    );
+  }
+
+  async function approveFromMaoeCard(actionId: string) {
+    try {
+      await transitionAction(actionId, 'approved');
+      patchMaoeCardApprovalStatus(actionId, 'approved');
+      setMessages((prev) => [...prev, toChatMessage('assistant', `✅ Approval granted for action ${actionId}`)]);
+      await refreshOps();
+      await refreshOrchestration();
+    } catch (err) {
+      setMessages((prev) => [...prev, toChatMessage('assistant', `Approval error: ${String(err)}`)]);
+    }
+  }
+
+  async function reaffirmFromMaoeCard(actionId: string) {
+    try {
+      await reaffirmApprovalAction(actionId);
+      patchMaoeCardApprovalStatus(actionId, 'approved');
+      setMessages((prev) => [...prev, toChatMessage('assistant', `Approval refreshed for action ${actionId}`)]);
+      await refreshOps();
+      await refreshOrchestration();
+    } catch (err) {
+      setMessages((prev) => [...prev, toChatMessage('assistant', `Re-approve error: ${String(err)}`)]);
+    }
+  }
+
+  async function cancelFromMaoeCard(actionId: string) {
+    try {
+      await transitionAction(actionId, 'cancelled');
+      patchMaoeCardApprovalStatus(actionId, 'cancelled');
+      setMessages((prev) => [...prev, toChatMessage('assistant', `Cancelled action ${actionId}`)]);
+      await refreshOps();
+      await refreshOrchestration();
+    } catch (err) {
+      setMessages((prev) => [...prev, toChatMessage('assistant', `Cancel error: ${String(err)}`)]);
+    }
+  }
+
+  async function executeFromMaoeCard(actionId: string) {
+    try {
+      const res = await transitionAction(actionId, 'executed');
+      patchMaoeCardApprovalStatus(actionId, 'executed');
+      setMessages((prev) => [...prev, toChatMessage('assistant', `Executed action ${actionId}`)]);
+      if (res.execution) {
+        const exec = res.execution;
+        let title = 'Execution Result';
+        let payload: Record<string, unknown> = exec;
+        if (exec && typeof exec === 'object' && 'draft' in exec) {
+          title = 'Local Draft Materialized';
+        }
+        if (exec && typeof exec === 'object' && 'event' in exec) {
+          title = 'Local Calendar Event Created';
+        }
+        setMaoeCards((prev) => [
+          {
+            id: `${Date.now()}_exec_${actionId}`,
+            type: 'ExecutionResultCard',
+            title,
+            data: payload,
+          },
+          ...prev,
+        ].slice(0, 20));
+      }
+      await refreshOps();
+      await refreshOrchestration();
+    } catch (err) {
+      const message = String(err);
+      if (message.includes('execution_policy_blocked:approval_stale_reapproval_required')) {
+        setMessages((prev) => [
+          ...prev,
+          toChatMessage('assistant', `Execution blocked: approval is stale for ${actionId}. Re-approve the action, then execute again.`),
+        ]);
+      } else {
+        setMessages((prev) => [...prev, toChatMessage('assistant', `Execute error: ${message}`)]);
+      }
+    }
+  }
+
+  function runMaoeQuickAction(action: { id: string; label: string; action: string }) {
+    if (action.action === 'open_actions' || action.action === 'approve') {
+      setWorkspaceView('actions');
+      return;
+    }
+    if (action.action === 'view_calendar') {
+      setWorkspaceView('calendar');
+      return;
+    }
+    if (action.action === 'view_draft') {
+      setWorkspaceView('drafts');
+      return;
+    }
+    if (action.action === 'clarify') {
+      setWorkspaceView('assistant');
+      return;
+    }
+    if (action.action === 'retry') {
+      setWorkspaceView('assistant');
+      setStatus(`Quick action: ${action.label}`);
+      return;
+    }
+    setStatus(`Quick action unsupported: ${action.label}`);
   }
 
   async function completeGoogleConnect() {
@@ -553,9 +726,25 @@ export default function App() {
         model,
         messages: [...messages, nextUser].map((m) => ({ role: m.role, content: m.content })),
         tools,
+        channel: 'in_app',
+        attachments: attachedFiles.map((f) => ({ id: f.id, name: f.name, mimeType: f.type })),
       })
         .then((res) => {
           setMessages((prev) => [...prev, toChatMessage('assistant', res.message.content)]);
+          const responseCards = res.cards ?? [];
+          const responseQuickActions = res.quickActions ?? [];
+          if (responseCards.length > 0) {
+            setMaoeCards((prev) => [
+              ...responseCards.map((c, idx) => ({ ...c, id: `${Date.now()}_${idx}_${c.type}` })),
+              ...prev,
+            ].slice(0, 20));
+          }
+          setMaoeQuickActions(responseQuickActions);
+          if (res.orchestration?.runId) {
+            void refreshOrchestration(res.orchestration.runId);
+          } else {
+            void refreshOrchestration();
+          }
           void refreshOps();
         })
         .catch((err) => {
@@ -784,6 +973,122 @@ export default function App() {
     </div>
   );
 
+  const renderOrchestrationWorkspace = () => (
+    <div className="drafts-workspace">
+      <div className="ops-card drafts-workbench-card">
+        <div className="section-head">Multi-Agent Orchestration Trace</div>
+        <div className="muted small">Reader → Thinker → Judge → Tool Executor → Responder (persisted in SQLite)</div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+          <button onClick={() => void refreshOrchestration()}>Refresh Runs</button>
+          <button onClick={() => selectedRunId && void refreshOrchestration(selectedRunId)} disabled={!selectedRunId}>Reload Selected</button>
+          {orchestrationStatus && <span className="muted small">{orchestrationStatus}</span>}
+        </div>
+      </div>
+
+      <div className="orchestration-grid">
+        <div className="ops-card">
+          <div className="section-head" style={{ marginBottom: 8 }}>Runs</div>
+          <div className="action-list" style={{ maxHeight: 520 }}>
+            {orchestrationRuns.length === 0 && <div className="muted">No MAOE runs yet</div>}
+            {orchestrationRuns.map((run) => (
+              <button
+                key={run.id}
+                className={`orchestration-run-row ${selectedRunId === run.id ? 'active' : ''}`}
+                onClick={() => void refreshOrchestration(run.id)}
+              >
+                <div className="orchestration-run-id">{run.id}</div>
+                <div className="orchestration-run-meta">
+                  <span>{run.mode}</span>
+                  <span>{run.status}</span>
+                  <span>{new Date(run.createdAt).toLocaleTimeString()}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="ops-card">
+          <div className="section-head" style={{ marginBottom: 8 }}>Selected Run</div>
+          {!selectedRunDetails && <div className="muted">Select a run to inspect</div>}
+          {selectedRunDetails && (
+            <div className="orchestration-detail-stack">
+              <div className="orchestration-strip">
+                <span className="calendar-badge neutral">{selectedRunDetails.run.mode}</span>
+                <span className={`calendar-badge ${selectedRunDetails.run.status === 'failed' ? 'danger' : 'accent'}`}>{selectedRunDetails.run.status}</span>
+                <span className="calendar-badge neutral">{selectedRunDetails.run.channel}</span>
+                <span className="calendar-badge neutral">{selectedRunDetails.run.model}</span>
+                {typeof thinkerPlannerSource === 'string' && <span className="calendar-badge neutral">planner {thinkerPlannerSource}</span>}
+              </div>
+
+              <div className="orchestration-section">
+                <div className="calendar-panel-title">Trace Timeline</div>
+                <div className="audit-list">
+                  {selectedRunDetails.traces.map((t) => (
+                    <div key={t.id} className="audit-row">
+                      <div className="small mono">{new Date(t.createdAt).toLocaleTimeString()}</div>
+                      <div>{t.agent}</div>
+                      <div className="muted small">{t.status}</div>
+                    </div>
+                  ))}
+                  {selectedRunDetails.traces.length === 0 && <div className="muted">No traces</div>}
+                </div>
+              </div>
+
+              <div className="orchestration-section">
+                <div className="calendar-panel-title">Decisions</div>
+                <div className="action-list">
+                  {selectedRunDetails.decisions.map((d) => (
+                    <div key={d.id} className="action-row">
+                      <div>
+                        <div className="action-id">{d.stage}</div>
+                        <div className="muted small">{d.status} · approval {d.requiresApproval ? 'yes' : 'no'}</div>
+                        {d.requiredFields.length > 0 && <div className="muted small">Fields: {d.requiredFields.join(', ')}</div>}
+                      </div>
+                    </div>
+                  ))}
+                  {selectedRunDetails.decisions.length === 0 && <div className="muted">No decisions</div>}
+                </div>
+              </div>
+
+              <div className="orchestration-section">
+                <div className="calendar-panel-title">Tool Executions</div>
+                <div className="action-list">
+                  {selectedRunDetails.toolExecutions.map((t) => (
+                    <div key={t.id} className="action-row">
+                      <div>
+                        <div className="action-id">{t.tool}</div>
+                        <div className="muted small">{t.status} · {t.toolCallId}</div>
+                        {t.errorDetails && <div className="muted small">Error: {t.errorDetails}</div>}
+                      </div>
+                    </div>
+                  ))}
+                  {selectedRunDetails.toolExecutions.length === 0 && <div className="muted">No tool executions</div>}
+                </div>
+              </div>
+
+              <div className="orchestration-section">
+                <div className="calendar-panel-title">Planner Snapshot</div>
+                <pre className="orchestration-json">
+                  {JSON.stringify(
+                    {
+                      context: selectedRunDetails.contextPacks[0]?.payload ?? null,
+                      plan: selectedRunDetails.plans[0]?.payload ?? null,
+                      decisions: selectedRunDetails.decisions.map((d) => ({ stage: d.stage, status: d.status, requiredFields: d.requiredFields })),
+                    },
+                    null,
+                    2,
+                  )}
+                </pre>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  const thinkerPlannerSource = selectedRunDetails?.traces.find((t) => t.agent === 'thinker')?.details?.plannerSource;
+
   return (
     <div className="workspace-root">
       <header className="topbar">
@@ -800,6 +1105,7 @@ export default function App() {
             <button className={`nav-tab ${workspaceView === 'tools' ? 'active' : ''}`} onClick={() => setWorkspaceView('tools')}>Tools</button>
             <button className={`nav-tab ${workspaceView === 'actions' ? 'active' : ''}`} onClick={() => setWorkspaceView('actions')}>Actions</button>
             <button className={`nav-tab ${workspaceView === 'audit' ? 'active' : ''}`} onClick={() => setWorkspaceView('audit')}>Audit</button>
+            <button className={`nav-tab ${workspaceView === 'orchestration' ? 'active' : ''}`} onClick={() => setWorkspaceView('orchestration')}>MAOE</button>
           </div>
         </div>
         <div className="topbar-right">
@@ -836,6 +1142,7 @@ export default function App() {
             <button className={`sidebar-nav-item ${workspaceView === 'tools' ? 'active' : ''}`} onClick={() => setWorkspaceView('tools')}><span>🧰</span> Tools</button>
             <button className={`sidebar-nav-item ${workspaceView === 'actions' ? 'active' : ''}`} onClick={() => setWorkspaceView('actions')}><span>🕒</span> Pending Actions</button>
             <button className={`sidebar-nav-item ${workspaceView === 'audit' ? 'active' : ''}`} onClick={() => setWorkspaceView('audit')}><span>📜</span> Audit Log</button>
+            <button className={`sidebar-nav-item ${workspaceView === 'orchestration' ? 'active' : ''}`} onClick={() => setWorkspaceView('orchestration')}><span>🧠</span> MAOE Trace</button>
             <button className={`sidebar-nav-item ${workspaceView === 'settings' ? 'active' : ''}`} onClick={() => setWorkspaceView('settings')}><span>⚙️</span> Settings</button>
           </div>
         </aside>
@@ -854,6 +1161,8 @@ export default function App() {
                       ? 'Pending Actions'
                       : workspaceView === 'audit'
                         ? 'Audit Log'
+                        : workspaceView === 'orchestration'
+                          ? 'MAOE Trace'
                         : workspaceView === 'projects'
                         ? 'Projects Workspace'
                         : workspaceView === 'settings'
@@ -987,10 +1296,62 @@ export default function App() {
                   </div>
                 </div>
               )}
+              {workspaceView === 'orchestration' && renderOrchestrationWorkspace()}
               {workspaceView === 'projects' && <div className="empty-state">Project generator workspace is next (Phase 2). Use chat with `/projects` for now.</div>}
               {workspaceView === 'settings' && <div className="empty-state">Settings workspace will centralize model defaults, tools, and permissions.</div>}
               {workspaceView === 'assistant' && (
                 <>
+              {maoeCards.length > 0 && (
+                <div className="email-preview-stack">
+                  {maoeCards.map((card) => {
+                    const approvalId = extractApprovalActionIdFromCard(card);
+                    const approvalStatus = extractApprovalActionStatusFromCard(card);
+                    return (
+                      <div key={card.id} className="email-card email-card-thread">
+                        <div className="email-card-head">
+                          <div>
+                            <div className="email-card-title">{card.title}</div>
+                            <div className="email-card-sub">
+                              {card.type}
+                              {approvalStatus ? ` · ${approvalStatus}` : ''}
+                            </div>
+                          </div>
+                          {approvalId && (
+                            <div className="action-buttons">
+                              {approvalStatus === 'prepared' && (
+                                <>
+                                  <button onClick={() => void approveFromMaoeCard(approvalId)}>Approve</button>
+                                  <button onClick={() => void cancelFromMaoeCard(approvalId)}>Cancel</button>
+                                </>
+                              )}
+                              {approvalStatus === 'approved' && (
+                                <>
+                                  <button onClick={() => void reaffirmFromMaoeCard(approvalId)}>Re-approve</button>
+                                  <button onClick={() => void executeFromMaoeCard(approvalId)}>Execute</button>
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        {card.summary && <div className="muted small" style={{ marginBottom: 8 }}>{card.summary}</div>}
+                        <pre className="email-card-pre">{JSON.stringify(card.data ?? {}, null, 2)}</pre>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {maoeQuickActions.length > 0 && (
+                <div className="ops-card" style={{ marginBottom: 12 }}>
+                  <div className="section-head" style={{ marginBottom: 8 }}>Quick Actions</div>
+                  <div className="action-buttons" style={{ flexWrap: 'wrap' }}>
+                    {maoeQuickActions.map((qa) => (
+                      <button key={qa.id} onClick={() => runMaoeQuickAction(qa)}>
+                        {qa.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               {calendarPreviewCards.length > 0 && (
                 <div className="calendar-preview-stack">
                   {calendarPreviewCards.map((card) => (

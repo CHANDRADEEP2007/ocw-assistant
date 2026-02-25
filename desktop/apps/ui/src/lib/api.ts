@@ -21,8 +21,21 @@ export async function chat(input: {
   model?: string;
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
   tools?: string[];
+  channel?: 'in_app' | 'telegram';
+  attachments?: Array<{ id?: string; name?: string; mimeType?: string }>;
 }) {
-  return j<{ ok: true; profile: unknown; message: { role: 'assistant'; content: string } }>('/api/chat', {
+  return j<{
+    ok: true;
+    profile: unknown;
+    message: { role: 'assistant'; content: string };
+    cards?: Array<{ type: string; title: string; data?: Record<string, unknown>; summary?: string }>;
+    quickActions?: Array<{ id: string; label: string; action: string }>;
+    orchestration?: {
+      runId?: string;
+      decision: { status: string; requiresApproval: boolean; requiredFields: string[]; policyNotes: string[] };
+      toolResults: Array<{ toolCallId: string; tool: string; ok: boolean; error?: string }>;
+    };
+  }>('/api/chat', {
     method: 'POST',
     body: JSON.stringify(input),
   });
@@ -42,9 +55,16 @@ export async function prepareAction(input: {
 }
 
 export async function transitionAction(actionId: string, nextStatus: 'approved' | 'executed' | 'failed' | 'cancelled') {
-  return j<{ item: ApprovalAction }>(`/api/actions/${actionId}/transition`, {
+  return j<{ item: ApprovalAction; execution?: Record<string, unknown> }>(`/api/actions/${actionId}/transition`, {
     method: 'POST',
     body: JSON.stringify({ nextStatus, approvedBy: 'local-user' }),
+  });
+}
+
+export async function reaffirmAction(actionId: string) {
+  return j<{ item: ApprovalAction }>(`/api/actions/${actionId}/reaffirm`, {
+    method: 'POST',
+    body: JSON.stringify({ approvedBy: 'local-user' }),
   });
 }
 
@@ -54,6 +74,57 @@ export async function listActions() {
 
 export async function listAuditLogs() {
   return j<{ items: AuditEntry[] }>('/api/audit-logs?limit=50');
+}
+
+export type OrchestrationRunListItem = {
+  id: string;
+  conversationId: string | null;
+  channel: string;
+  mode: string;
+  model: string;
+  status: string;
+  errorDetails: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type OrchestrationRunDetails = {
+  run: OrchestrationRunListItem;
+  contextPacks: Array<{ id: string; runId: string; intentGuess: string; payload: Record<string, unknown> | null; createdAt: string }>;
+  plans: Array<{ id: string; runId: string; intent: string; riskLevel: string; payload: Record<string, unknown> | null; createdAt: string }>;
+  decisions: Array<{
+    id: string;
+    runId: string;
+    stage: string;
+    status: string;
+    requiresApproval: boolean;
+    requiredFields: string[];
+    policyNotes: string[];
+    payload: Record<string, unknown> | null;
+    createdAt: string;
+  }>;
+  traces: Array<{ id: string; runId: string; agent: string; status: string; details: Record<string, unknown> | null; errorDetails: string | null; createdAt: string }>;
+  toolExecutions: Array<{
+    id: string;
+    runId: string;
+    toolCallId: string;
+    tool: string;
+    status: string;
+    args: Record<string, unknown> | null;
+    result: Record<string, unknown> | null;
+    errorDetails: string | null;
+    startedAt: string | null;
+    finishedAt: string | null;
+    createdAt: string;
+  }>;
+};
+
+export async function listOrchestrationRuns(limit = 50) {
+  return j<{ items: OrchestrationRunListItem[] }>(`/api/orchestration/runs?limit=${limit}`);
+}
+
+export async function getOrchestrationRun(runId: string) {
+  return j<{ item: OrchestrationRunDetails }>(`/api/orchestration/runs/${encodeURIComponent(runId)}`);
 }
 
 export type ConnectedAccount = {
